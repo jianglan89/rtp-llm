@@ -1,12 +1,13 @@
 import logging
 import math
-import torch
 import os
+from functools import reduce
+import torch
 import torch.serialization
 from typing import Any, NamedTuple, Callable, List, Dict, Set, Tuple, Optional, Union
-from maga_transformer.utils.ckpt_database import FinetuneType, TrainType, CkptFileInfo, LoraConfig
+from maga_transformer.utils.database import FinetuneType, TrainType, CkptFileInfo, LoraConfig
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.ckpt_database import CkptDatabase
+from maga_transformer.utils.database import BaseDatabase
 from maga_transformer.utils.RWLock import RWlock
 
 def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
@@ -44,7 +45,14 @@ def identity(ts: List[torch.Tensor], allow_empty=False) -> torch.Tensor:
         return None
     return ts[0].contiguous()
 
+def shift_one(ts: List[torch.Tensor], allow_empty=False) -> torch.Tensor:
+    if len(ts) == 0 and allow_empty:
+        return None
+    return (ts[0] + 1.0).contiguous()
+
 def sp_0(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.Tensor]:
+    if (t.dim() == 3):
+        return torch.split(t, t.shape[1] // tp, dim=1)[tp_rank]
     return torch.split(t, t.shape[0] // tp, dim=0)[tp_rank]
 
 def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.Tensor]:
@@ -57,18 +65,28 @@ def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.T
 # MQA layout: [D, head*size_per_head, kv_head*size_per_head, kv_head*size_per_head] (sp_head)
 def sp_head(t: torch.Tensor, tp: int, tp_rank: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
     hidden_size = t.shape[0]
-    if len(t.shape) == 2 and t.shape[1] != t.shape[0] * 3:
-        qk_hidden_size = (t.shape[1] - t.shape[0]) // 2
-        qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
-        if kv_broadcast:
-            ks = t[:,hidden_size:hidden_size + qk_hidden_size]
-            vs = t[:,hidden_size + qk_hidden_size:]
+    qkv_hidden_size = t.shape[1]
+    if t.dtype == torch.int32:
+        return sp_neg1(t.reshape(hidden_size, 3, qkv_hidden_size // 3), tp, tp_rank)
+    else:     
+        if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
+            kv_hidden_size = (qkv_hidden_size - hidden_size) // 2
+            qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
+            if kv_broadcast:
+                ks = t[:,hidden_size:hidden_size + kv_hidden_size]
+                vs = t[:,hidden_size + kv_hidden_size:]
+            else:
+                ks = sp_neg1(t[:,hidden_size:hidden_size + kv_hidden_size], tp, tp_rank)
+                vs = sp_neg1(t[:,hidden_size + kv_hidden_size:], tp, tp_rank)
+            return torch.concat([qs, ks, vs], dim=1).contiguous()
         else:
-            ks = sp_neg1(t[:,hidden_size:hidden_size + qk_hidden_size], tp, tp_rank)
-            vs = sp_neg1(t[:,hidden_size + qk_hidden_size:], tp, tp_rank)
-        return torch.concat([qs, ks, vs], dim=1).contiguous()
-    else:
-        return sp_neg1(t.reshape(hidden_size, 3, hidden_size), tp, tp_rank)
+            return sp_neg1(t.reshape(hidden_size, 3, hidden_size), tp, tp_rank)
+
+def sp_head_s(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+    return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
+
+def sp_head_z(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+    return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
 
 def sp_head_b(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
     t = t.reshape(-1)
@@ -150,6 +168,21 @@ def trans_lora_qkv(ts: List[torch.Tensor], head_num: int, head_size: int):
     r = ts[0].shape[1]
     return ts[0].T.reshape(r, head_num, split, head_size).permute(0, 2, 1, 3).reshape(r, split, head_num * head_size).contiguous()
 
+def merge_qkv_lora_A(ts: torch.Tensor):
+    q, k, v = ts
+    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    return qkv_weight
+
+def merge_qkv_lora_B(ts: List[torch.Tensor]):
+    q, k, v = ts
+    t_q = torch.zeros_like(q)
+    t_k = torch.zeros_like(k)
+    t_v = torch.zeros_like(v)
+    return torch.cat((torch.cat((q,   t_q, t_q), dim=1),
+                      torch.cat((t_k, k,   t_k), dim=1),
+                      torch.cat((t_v, t_v, v  ), dim=1))).T.contiguous()
+
+
 class W:
     # global
     embedding = 'embedding'
@@ -158,7 +191,8 @@ class W:
     prefix_w = 'transformer.prefix_encoder.embedding.weight'
     pre_decoder_ln_gamma = 'pre_decoder_layernorm.gamma'
     pre_decoder_ln_beta = 'pre_decoder_layernorm.bias'
-    wpe = 'position_encoding.weight'
+    positional_embedding = 'position_encoding.weight'
+    token_type_embedding = 'token_type_embedding.weight'
     final_ln_gamma = 'final_layernorm.gamma'
     final_ln_beta = 'final_layernorm.beta'
 
@@ -185,6 +219,9 @@ class W:
     ffn_ln_beta = 'ffn_weights.dense_layernorm.beta'
     ffn_w2 = 'ffn_weights.intermediate_weight2.kernel'
     ffn_b2 = 'ffn_weights.intermediate_weight2.bias'
+    ffn_gate = 'ffn_weights.gate.kernel'
+    post_ffn_ln_gamma = "post_ffn_layernorm_weights.gamma"
+    post_ffn_ln_beta = "post_ffn_layernorm_weights.beta"
 
     # lora
     attn_qkv_w_lora_a = 'self_attention_weights.query_weight.kernel.lora_A'
@@ -198,10 +235,22 @@ class W:
     ffn_w2_lora_a = 'ffn_weights.intermediate_weight2.kernel.lora_A'
     ffn_w2_lora_b = 'ffn_weights.intermediate_weight2.kernel.lora_B'
 
+    # gptq
+    attn_qkv_z = 'self_attention_weights.query_weight.zero'
+    attn_qkv_s = 'self_attention_weights.query_weight.weight_only_quant_scale'
+    attn_o_z = 'self_attention_weights.attention_output_weight.zero'
+    attn_o_s = 'self_attention_weights.attention_output_weight.weight_only_quant_scale'
+    ffn_z1 = 'ffn_weights.intermediate_weight.zero'
+    ffn_s1 = 'ffn_weights.intermediate_weight.weight_only_quant_scale'
+    ffn_z3 = 'ffn_weights.intermediate_weight3.zero'
+    ffn_s3 = 'ffn_weights.intermediate_weight3.weight_only_quant_scale'
+    ffn_z2 = 'ffn_weights.intermediate_weight2.zero'
+    ffn_s2 = 'ffn_weights.intermediate_weight2.weight_only_quant_scale'
+
     # medusa lm_head
     medusa_head = 'medusa_head'
 
-    int8_quant_w = set([
+    quant_w = set([
         attn_qkv_w,
         attn_o_w,
         ffn_w1,
@@ -209,7 +258,58 @@ class W:
         ffn_w3,
     ])
 
-    gpt_style_tp_strategy = {
+    int4_quant_params = set([
+        attn_qkv_z,
+        attn_qkv_s,
+        attn_o_z,
+        attn_o_s,
+        ffn_z1,
+        ffn_s1,
+        ffn_z2,
+        ffn_s2,
+        ffn_z3,
+        ffn_s3,
+    ])
+
+    int8_attn_weights = [
+        [attn_qkv_w, attn_qkv_s],
+        [attn_o_w, attn_o_s],
+    ]
+
+    int8_ffn_weights = [
+        [ffn_w1, ffn_s1],
+        [ffn_w3, ffn_s3],
+        [ffn_w2, ffn_s2], 
+    ]
+
+    int8_ffn_weights_2 = [
+        [ffn_w1, ffn_s1],
+        [ffn_w2, ffn_s2], 
+    ]
+
+    int4_attn_weights = [
+        [attn_qkv_w, attn_qkv_z, attn_qkv_s],
+        [attn_o_w, attn_o_z, attn_o_s],
+    ]
+
+    int4_ffn_weights = [
+        [ffn_w1, ffn_z1, ffn_s1],
+        [ffn_w3, ffn_z3, ffn_s3],
+        [ffn_w2, ffn_z2, ffn_s2], 
+    ]
+
+    int4_ffn_weights_2 = [
+        [ffn_w1, ffn_z1, ffn_s1],
+        [ffn_w2, ffn_z2, ffn_s2], 
+    ]
+
+    moe_int8_quant_weights = [
+        [ffn_w1, ffn_s1],
+        [ffn_w3, ffn_s3],
+        [ffn_w2, ffn_s2], 
+    ]
+
+    gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
         lm_head: sp_0_pad8,
         lm_head_b: sp_0_pad8,
@@ -222,18 +322,28 @@ class W:
         pre_attn_ln_gamma: sp_id,
         pre_attn_ln_beta: sp_id,
         attn_qkv_w: sp_head,
+        attn_qkv_z: sp_head_z,
+        attn_qkv_s: sp_head_s,
         attn_qkv_b: sp_head_b,
         attn_o_w: sp_0,
+        attn_o_z: sp_0,
+        attn_o_s: sp_0,
         attn_o_b: sp_id,
         ffn_w1: sp_neg1,
+        ffn_z1: sp_neg1,
+        ffn_s1: sp_neg1,
         ffn_b1: sp_neg1,
         ffn_w3: sp_neg1,
+        ffn_z3: sp_neg1,
+        ffn_s3: sp_neg1,
         ffn_b3: sp_neg1,
         ffn_w2: sp_0,
+        ffn_z2: sp_0,
+        ffn_s2: sp_0,
         ffn_b2: sp_id,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
-        wpe: sp_id,
+        positional_embedding: sp_id,
         attn_qkv_w_lora_a: sp_id,
         attn_qkv_w_lora_b: sp_head_lora,
         attn_o_w_lora_a: sp_0,
@@ -244,6 +354,10 @@ class W:
         ffn_w3_lora_b: sp_neg1,
         ffn_w2_lora_a: sp_0,
         ffn_w2_lora_b: sp_id,
+        ffn_gate: sp_id,
+        post_ffn_ln_beta: sp_id,
+        post_ffn_ln_gamma: sp_id,
+        token_type_embedding: sp_id        
     }
 
     weights_list = [
@@ -252,7 +366,7 @@ class W:
         lm_head_b,
         pre_decoder_ln_gamma,
         pre_decoder_ln_beta,
-        wpe,
+        positional_embedding,
         final_ln_gamma,
         final_ln_beta,
         prefix_w
@@ -276,7 +390,8 @@ class W:
         ffn_ln_gamma,
         ffn_ln_beta,
         ffn_w2,
-        ffn_b2
+        ffn_b2,
+        ffn_gate
     ]
 
     skip_weights_list = [
@@ -293,7 +408,8 @@ class CkptWeightInfo:
     name: str
     merge_fun: Callable[[List[torch.Tensor]], torch.Tensor]
 
-    def __init__(self, name, merge_fun) -> None:
+    # hf checkpoint没有tensor做拆分的ckpt，所以默认函数可以是identity
+    def __init__(self, name: str, merge_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity) -> None:
         self.name = name
         self.merge_fun = merge_fun
 
@@ -312,7 +428,7 @@ class WeightInfo:
     weights: List[CkptWeightInfo]
     process_fun: Callable[[List[torch.Tensor]], torch.Tensor]
 
-    def __init__(self, name, weights, process_fun) -> None:
+    def __init__(self, name: str, weights: List[CkptWeightInfo], process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity) -> None:
         self.name = name
         self.weights = weights
         self.process_fun = process_fun
@@ -369,16 +485,24 @@ class ModelWeightInfo:
 
         for lora_a_b in ['lora_A', 'lora_B']:
             for lora_name in lora_names:
+                ckpt_layer_weight = None
                 for layer_weight in layer_weights:
 
                     if layer_weight.name == lora_name:
-                        layer_weight_ckpt_name = layer_weight.weights[0].name
+                        ckpt_layer_weight = layer_weight.weights
 
-                assert (layer_weight_ckpt_name != None)
-                ckpt_name = lora_base_name.format(layer_weight_ckpt_name[:-len(".weight")], lora_a_b)
-                ckpt_weight_info = CkptWeightInfo(ckpt_name, identity)
-                lora_layer_weights.append(WeightInfo(lora_name + "." + lora_a_b, [ckpt_weight_info], transpose))
-
+                assert (ckpt_layer_weight != None)
+                if lora_name == W.attn_qkv_w and len(ckpt_layer_weight) == 3:
+                    ckpt_names = [lora_base_name.format(ckpt.name[:-len(".weight")], lora_a_b) for ckpt in ckpt_layer_weight]
+                    qkv_ckpt_weights = [CkptWeightInfo(name, identity) for name in ckpt_names]
+                    if lora_a_b == 'lora_A':
+                        lora_layer_weights.append(WeightInfo(lora_name + "." + lora_a_b, qkv_ckpt_weights, merge_qkv_lora_A))
+                    elif lora_a_b == 'lora_B':
+                        lora_layer_weights.append(WeightInfo(lora_name + "." + lora_a_b, qkv_ckpt_weights, merge_qkv_lora_B))
+                else:
+                    ckpt_name = lora_base_name.format(ckpt_layer_weight[0].name[:-len(".weight")], lora_a_b)
+                    ckpt_weight_info = CkptWeightInfo(ckpt_name, identity)
+                    lora_layer_weights.append(WeightInfo(lora_name + "." + lora_a_b, [ckpt_weight_info], transpose))
         return lora_layer_weights
 
     def set_lora(self, qkv_fun = None, half1 = None , half2 = None):
@@ -410,7 +534,7 @@ class ModelWeightInfo:
 class ModelDeployWeightInfo:
 
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
-        self._hidden_size = config.head_num * config.size_per_head
+        self._hidden_size = config.hidden_size
         self._inter_size = config.inter_size
         self._inter_padding_size = config.inter_padding_size
         self._head_num = config.head_num
@@ -420,7 +544,11 @@ class ModelDeployWeightInfo:
         self._size_per_head = config.size_per_head
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
-        self._int8_mode = config.int8_mode
+        self._int8_mode = config.quant_algo.int8_mode
+        self._int4_mode = config.quant_algo.int4_mode
+        self._is_quant_mode = config.is_quant_mode
+        self._is_gptq = config.quant_algo.is_gptq
+        self._is_awq = config.quant_algo.is_awq
         self._num_layers = config.num_layers
         self._layer_head_num = config.layer_head_num
         self._layer_inter_padding_size = config.layer_inter_padding_size
@@ -431,9 +559,13 @@ class ModelDeployWeightInfo:
         self._src_quantization_bit = config.src_quantization_bit
         self.tp_split_emb_and_lm_head = config.tp_split_emb_and_lm_head
 
-        self._is_medusa_model = config.gpt_init_params.use_medusa        
+        self._is_medusa_model = config.gpt_init_params.use_medusa
         self._medusa_head_num = 0 if config.medusa_config is None else config.medusa_config.medusa_num_heads
         self._medusa_layer_num = 0 if config.medusa_config is None else config.medusa_config.medusa_num_layers
+
+        self._is_gated_activation = config.gpt_init_params.isGatedActivation()
+        self.expert_num_ = config.gpt_init_params.expert_num
+        self.moe_k_      = config.gpt_init_params.moe_k
 
     def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:
         # auto create weight info based on exist tensor names
@@ -508,10 +640,11 @@ class ModelDeployWeightInfo:
         if 'ft_module' not in ckpt_metas[0].get_tensor_names():
             # call subclass process_meta
             self.fix_megatron_layer_id(ckpt_metas)
-            for ckpt_file in ckpt_metas:
-                self._process_meta(ckpt_file.get_metadata())
+            meta_dicts = [ckpt_file.get_metadata() for ckpt_file in ckpt_metas]
+            weight_keys = set(reduce(lambda x,y:x+y, [list(meta.keys()) for meta in meta_dicts], []))
+            self._process_meta(meta_dicts, weight_keys)
 
-    def _process_meta(self, meta_dict):
+    def _process_meta(self, meta_dict, weight_keys):
         pass
 
     def fix_megatron_layer_id(self, meta_dict: List[CkptFileInfo]):
@@ -614,10 +747,17 @@ class LoRAMap():
             self.name_id_map[name] = id
 
     def get_id(self, name: str) -> int:
-        if name not in self.name_id_map:
+        if name == "":
             return -1
+        if name not in self.name_id_map:
+            raise Exception(f"lora map has no adapter model: {name}")
         return self.name_id_map[name]
-    
+
+    def has_id(self, name: str) -> bool:
+        if name not in self.name_id_map:
+            return False
+        return True
+
     def add_lora_name(self, name: str, weights: LoRAWeights) -> int:
         self._create_id(name)
         id = self.name_id_map[name]
@@ -652,8 +792,7 @@ class LoraPathException(Exception):
         super().__init__(*args)
 
 class LoraResource():
-
-    def __init__(self, lora_infos: Dict[str, str] = dict(), database: Optional[CkptDatabase] = None,
+    def __init__(self, lora_infos: Dict[str, str] = dict(), database: Optional[BaseDatabase] = None,
                  weights_info: Optional[WeightInfo] = None,
                  lora_map: Optional[LoRAMap] = None):
         self.lora_infos = lora_infos
@@ -682,7 +821,7 @@ class LoraResource():
         self.rlock_map[name] = RWlock()
         self.to_add_lora_id.append(id)
         return id
-    
+
     def remove_lora_name(self, name: str):
         id = self.lora_map.remove_lora_name(name)
         self.to_remove_lora_id.append(id)
@@ -713,7 +852,7 @@ class LoraResource():
                 self.write_release(lora_name)
         for lora_name in remove_lora_names:
             self.delete_rlock(lora_name)
-        
+
     def add_new_lora(self, lora_infos: Dict[str, str]):
         for lora_name, lora_path in lora_infos.items():
             if lora_name not in self.lora_infos:
@@ -721,13 +860,13 @@ class LoraResource():
         self.clear_for_update()
         for lora_config in self.database.LoraFileList.keys():
             lora_name = lora_config.name
-            if self.lora_map.get_id(lora_name) != -1:
+            if self.lora_map.has_id(lora_name):
                 continue
             lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name,  self.weights_info._int8_mode, 'cuda:0')
             _ = self.add_lora_name(lora_name, lora_weights)
         for op in self.ft_op:
             op.update_lora()
-        
+
     def update(self, lora_infos: Dict[str, str]):
         if self.max_lora_model_size != -1 and len(lora_infos) > self.max_lora_model_size:
             raise LoraCountException(f'lora_infos[{lora_infos}]\'s size exceed MAX_LORA_MODEL_SIZE[{self.max_lora_model_size}]')
@@ -736,12 +875,10 @@ class LoraResource():
             self.remove_old_lora(lora_infos)
             self.add_new_lora(lora_infos)
         self.lora_infos = lora_infos
-    
+
     def get_id(self, name: str) -> int:
         if self.lora_map != None:
             return self.lora_map.get_id(name)
-        else:
-            return -1
 
     def read_acquire(self, lora_name: str):
         if lora_name in self.rlock_map:
@@ -762,16 +899,12 @@ class LoraResource():
 class ModelWeights:
     def __init__(self, num_layers: int):
         self.weights: List[Dict[str, torch.Tensor]] = []
-        self.int8_weights: List[Dict[str, torch.Tensor]] = []
-        self.int8_scales: List[Dict[str, torch.Tensor]] = []
         self._pytorch_weights: Dict[str, torch.Tensor] = {}
         self.lora_resource: LoraResource = LoraResource()
         self._dtype = None
 
         for i in range(num_layers):
             self.weights.append({})
-            self.int8_weights.append({})
-            self.int8_scales.append({})
 
     def append_pytorch_weight(self, name: str, tensor: torch.Tensor):
         self._dtype = tensor.dtype
@@ -787,18 +920,8 @@ class ModelWeights:
     def has_pytorch_weight(self, name: str):
         return name in self._pytorch_weights
 
-    def append_layer_weight(self, int8_flag: bool, layer_id: int, name: str, tensor: torch.Tensor):
-        if int8_flag:
-            dummy, int8_weight, int8_scale = tensor
-            self.weights[layer_id][name] = dummy
-            self.int8_weights[layer_id][name] = int8_weight
-            self.int8_scales[layer_id][name] = int8_scale
-        else:
-            self.weights[layer_id][name] = tensor
-
-    def append_int8_weight(self, layer_id: int, name: str, tensor: torch.Tensor, scale: torch.Tensor):
-        self.int8_weights[layer_id][name] = tensor
-        self.int8_scales[layer_id][name] = scale
+    def append_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
+        self.weights[layer_id][name] = tensor
 
     @property
     def device(self):
@@ -807,3 +930,17 @@ class ModelWeights:
     @property
     def dtype(self):
         return self._dtype
+
+class LoraResourceHolder:
+    def __init__(self, lora_resource, adapter_name):
+        self._lora_resource = lora_resource
+        self._adapter_name = adapter_name
+        self._lora_resource.read_acquire(self._adapter_name)
+        self._lora_id = self._lora_resource.get_id(self._adapter_name)
+
+    @property
+    def lora_id(self):
+        return self._lora_id
+
+    def release(self):
+        self._lora_resource.read_release(self._adapter_name)

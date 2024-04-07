@@ -34,20 +34,20 @@ class Phi(GPT):
     def get_weight_cls():
         return PhiWeightInfo
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
+        size_per_head = int(config_dict.get('n_embd', 2048) / config_dict.get('n_head', 32))
         config = GptInitModelParameters(
             head_num=config_dict.get('n_head', 32),
-            size_per_head=int(config_dict.get('n_embd', 2048) / config_dict.get('n_head', 32)),
+            size_per_head=size_per_head,
             inter_size=4 * config_dict.get('n_embd', 2048),
             layer_num=config_dict.get('n_layer', 24),
             max_seq_len=config_dict.get('n_positions', 2048),
             vocab_size=config_dict.get('vocab_size', 32),
-            rotary_embedding_dim=config_dict.get('rotary_dim', 32),
+            rotary_embedding_dim=config_dict.get('rotary_dim', size_per_head),
             rotary_embedding_style=1,
-            use_gated_activation=False,
-            activation_type='gelu-none-approximate',
+            activation_type='gelu',
             has_positional_encoding=False,
             has_post_decoder_layernorm=True,
             has_lm_head_bias=True)

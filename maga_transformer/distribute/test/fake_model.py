@@ -1,17 +1,17 @@
 import torch
-from typing import Any, List, Optional, Iterator
+from typing import Optional, Iterator, List, Any, Generator, AsyncGenerator, Dict, Union
 
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.models.base_model import BaseTokenizer, BaseModel, GenerateOutput
+from maga_transformer.models.base_model import BaseModel, GenerateOutput
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
 
-class FakeTokenizer(BaseTokenizer):
+class FakeTokenizer(object):
     def encode(self, inputs: List[str]) -> List[int]:
         return [1,2,3,4]
 
     def decode(self, tokens: List[int]) -> str:
-        return ["fake output"]
+        return "fake output"
 
 class FakeConfig(object):
     def __init__(self):
@@ -36,16 +36,5 @@ class FakeModel(BaseModel):
     @classmethod
     def from_config(cls, config: Any) -> 'FakeModel':
         return cls(config)
-
-    @torch.no_grad()
-    async def generate_stream(
-            self, # type: ignore
-            inputs: torch.Tensor,
-            tokenizer: Any,
-            input_lengths: Optional[torch.Tensor],
-            images: List[List[str]],
-            generate_config: GenerateConfig) -> Iterator[GenerateOutput]:
-
-        yield GenerateOutput(torch.Tensor([[1,2,3,4]]), torch.Tensor([[1]]), torch.Tensor([True]))
 
 register_model("fake_model", FakeModel)

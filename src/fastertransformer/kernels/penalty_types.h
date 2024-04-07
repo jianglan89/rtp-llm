@@ -18,6 +18,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <cassert>
 
 #include "src/fastertransformer/utils/string_utils.h"
 
@@ -29,8 +30,7 @@ enum class RepetitionPenaltyType {
     None             // No repetition penalty.
 };
 
-inline float getDefaultPenaltyValue(RepetitionPenaltyType penalty_type)
-{
+inline float getDefaultPenaltyValue(RepetitionPenaltyType penalty_type) {
     switch (penalty_type) {
         case RepetitionPenaltyType::Additive:
             return 0.0f;

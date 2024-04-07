@@ -6,17 +6,20 @@ import torch
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 
-from transformers import PreTrainedTokenizer
-
 from maga_transformer.models.base_model import GenerateOutput
+from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
+from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
-    ChatCompletionRequest, RoleEnum, FunctionCall
+    ChatCompletionRequest, RoleEnum, FunctionCall, ChatCompletionResponseStreamChoice, \
+    DeltaMessage, FinisheReason, UsageInfo, RendererInfo
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
-from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
-    ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
+from maga_transformer.openai.renderer_factory_register import register_renderer
+from maga_transformer.utils.word_util import get_stop_word_slice_list, truncate_response_with_stop_words
+
+QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
 
 TOOL_DESC = """{name_for_model}: Call this tool to interact with the {name_for_human} API. What is the {name_for_human} API useful for? {description_for_model} Parameters: {parameters}"""
 
@@ -52,7 +55,7 @@ class ProcessedOutput:
 
 # TODO(wangyin): pass `max_window_size` to here.
 def make_context(
-    tokenizer: QWenTokenizer,
+    tokenizer: QwenTokenizerTypes,
     query: str,
     history: List[Tuple[str, str]] = [],
     system: str = "",
@@ -113,20 +116,34 @@ def make_context(
     return raw_text, context_tokens
 
 class QwenRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: QWenTokenizer, renderer_params: RendererParams):
+    def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
-        self.extra_stop_word_ids_list.append([37763, 367, 25]) # Observation:
+        self.add_extra_stop_word_ids([[37763, 367, 25]]) # Observation:
+
+        self.template_chat_renderer: Optional[BasicRenderer] = None
+        try:
+            if tokenizer.chat_template != None:
+                logging.info(f"qwen model has chat_template [{tokenizer.chat_template}], "
+                             "which will be used for non-function call dialogue.")
+                self.template_chat_renderer = BasicRenderer(tokenizer, renderer_params)
+        except AttributeError:
+            pass
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        assert (isinstance(self.tokenizer, QWenTokenizer))
-        query, history = self.parse_messages(request.messages, request.functions)
+        assert (isinstance(self.tokenizer, QwenTokenizerTypes))
+
+        if (self.template_chat_renderer != None) and \
+            ((request.functions == None) or (len(request.functions) == 0)):
+            return self.template_chat_renderer.render_chat(request)
+
+        query, history, system = self.parse_messages(request.messages, request.functions)
+        print(f"parsed query: {query}, history: {history}, system: {system}")
         input_ids = []
         if (query == _TEXT_COMPLETION_CMD):
             input_ids = self.text_complete_last_message(history)
         else:
             assert (isinstance(query, str))
-            input_ids = make_context(self.tokenizer, query, history,
-                                system="You are a helpful assistant.")[1]
+            input_ids = make_context(self.tokenizer, query, history, system)[1]
         return RenderedInputs(input_ids=input_ids)
 
     def text_complete_last_message(self, history):
@@ -151,13 +168,10 @@ class QwenRenderer(CustomChatRenderer):
             raise ValueError("At least one message must be from user.")
 
         messages = copy.deepcopy(messages)
-        default_system = "You are a helpful assistant."
-        system = ""
-        if messages[0].role == "system":
-            system = messages.pop(0).content
-            if system == default_system:
-                system = ""
-        assert (system != None)
+        if messages[0].role == 'system':
+            system = messages.pop(0).content.lstrip('\n').rstrip()
+        else:
+            system = 'You are a helpful assistant.'
 
         if functions:
             tools_text = []
@@ -181,84 +195,71 @@ class QwenRenderer(CustomChatRenderer):
                 tools_name_text.append(name_m)
             tools_text = "\n\n".join(tools_text)
             tools_name_text = ", ".join(tools_name_text)
-            system += "\n\n" + REACT_INSTRUCTION.format(
+            instruction = (REACT_INSTRUCTION.format(
                 tools_text=tools_text,
                 tools_name_text=tools_name_text,
-            )
-            system = system.lstrip("\n").rstrip()
+            ).lstrip('\n').rstrip())
+        else:
+            instruction = ''
 
-        _messages = messages
+        messages_with_fncall = messages
         messages = []
-        for m_idx, m in enumerate(_messages):
+        for m_idx, m in enumerate(messages_with_fncall):
             role, content, func_call = m.role, m.content, m.function_call
             content = content or ""
+            content = content.lstrip("\n").rstrip()
             if role == "function":
                 if (len(messages) == 0) or (messages[-1].role != "assistant"):
-                    raise ValueError(
-                        f"Invalid request: Expecting role assistant before role function."
-                    )
-                messages[-1].content += f"\nObservation: {content}"
-                if m_idx == len(_messages) - 1:
-                    messages[-1].content += "\nThought:"
-            elif role == "assistant":
+                    raise ValueError(f"Invalid request: Expecting role assistant before role function.")
+                messages[-1].content += f'\nObservation: {content}'
+                if m_idx == len(messages_with_fncall) - 1:
+                    # add a prefix for text completion
+                    messages[-1].content += '\nThought:'
+            elif role == 'assistant':
                 if len(messages) == 0:
-                    raise ValueError(
-                        f"Invalid request: Expecting role user before role assistant.",
-                    )
-                last_msg = messages[-1].content
-                last_msg_has_zh = len(re.findall(r"[\u4e00-\u9fff]+", last_msg)) > 0
+                    raise ValueError(f"Invalid request: Expecting role user before role assistant.")
                 if func_call is None:
                     if functions:
-                        content = DUMMY_THOUGHT["zh" if last_msg_has_zh else "en"] + content
+                        content = f'Thought: I now know the final answer.\nFinal Answer: {content}'
                 else:
                     f_name, f_args = func_call.name, func_call.arguments
-                    if not content:
-                        if last_msg_has_zh:
-                            content = f"Thought: 我可以使用 {f_name} API。"
-                        else:
-                            content = f"Thought: I can use {f_name}."
-                    content = f"\n{content}\nAction: {f_name}\nAction Input: {f_args}"
-                if messages[-1].role == "user":
+                    if not content.startswith('Thought:'):
+                        content = f'Thought: {content}'
+                    content = f'{content}\nAction: {f_name}\nAction Input: {f_args}'
+                if messages[-1].role == 'user':
                     messages.append(
-                        ChatMessage(role=RoleEnum.assistant, content=content.lstrip("\n").rstrip())
+                        ChatMessage(role=RoleEnum.assistant, content=content.lstrip('\n').rstrip())
                     )
                 else:
-                    messages[-1].content += content
-            elif role == "user":
+                    messages[-1].content += '\n' + content
+            elif role == 'user':
                 messages.append(
-                    ChatMessage(role=RoleEnum.user, content=content.lstrip("\n").rstrip())
-                )
+                    ChatMessage(role='user',content=content.lstrip('\n').rstrip()))
             else:
                 raise ValueError(f"Invalid request: Incorrect role {role}.")
 
         query = _TEXT_COMPLETION_CMD
-        if messages[-1].role == "user":
+        if messages[-1].role == 'user':
             query = messages[-1].content
             messages = messages[:-1]
 
         history = []  # [(Q1, A1), (Q2, A2), ..., (Q_last_turn, A_last_turn)]
         for i in range(0, len(messages), 2):
-            if messages[i].role == "user" and messages[i + 1].role == "assistant":
-                usr_msg = messages[i].content.lstrip("\n").rstrip()
-                bot_msg = messages[i + 1].content.lstrip("\n").rstrip()
-                if system and (i == len(messages) - 2):
-                    usr_msg = f"{system}\n\nQuestion: {usr_msg}"
-                    system = ""
-                for t in DUMMY_THOUGHT.values():
-                    t = t.lstrip("\n")
-                    if bot_msg.startswith(t) and ("\nAction: " in bot_msg):
-                        bot_msg = bot_msg[len(t) :]
+            if messages[i].role == 'user' and messages[i + 1].role == 'assistant':
+                usr_msg = messages[i].content.lstrip('\n').rstrip()
+                bot_msg = messages[i + 1].content.lstrip('\n').rstrip()
+                if instruction and (i == len(messages) - 2):
+                    usr_msg = f'{instruction}\n\nQuestion: {usr_msg}'
+                    instruction = ''
                 history.append([usr_msg, bot_msg])
             else:
                 raise ValueError(
                     "Invalid request: Expecting exactly one user (or function) role before every assistant role."
                 )
-
-        if system:
+        if instruction:
             assert query is not _TEXT_COMPLETION_CMD
-            query = f"{system}\n\nQuestion: {query}"
-
-        return query, history
+            query = f'{instruction}\n\nQuestion: {query}'
+        return query, history, system
 
     def _parse_function_response(self, response: str) -> Optional[DeltaMessage]:
         func_name, func_args = "", ""
@@ -273,6 +274,7 @@ class QwenRenderer(CustomChatRenderer):
             k = response.rfind("\nObservation:")
             func_name = response[i + len("\nAction:") : j].strip()
             func_args = response[j + len("\nAction Input:") : k].strip()
+        logging.info(f"parsed function from response: [{response}]: {func_name}, {func_args}")
         if func_name:
             return DeltaMessage(
                 content=response[:i],
@@ -290,9 +292,8 @@ class QwenRenderer(CustomChatRenderer):
         # TODO(wangyin): This slicing shouldn't be done here.
         # model should return output length, ids should be sliced with output length.
         output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()
-        finish_reason = self._check_finish_reason(output_ids) if finished else None
+        finish_reason = self._check_finish_reason(output_ids, input_length) if finished else None
 
-        output_ids = output_ids[input_length:]
         output_length = len(output_ids)
         output_ids = self._remove_stop_word_ids(output_ids)
         output_str = self.tokenizer.decode(output_ids)
@@ -306,19 +307,10 @@ class QwenRenderer(CustomChatRenderer):
             self,
             output_generator: AsyncGenerator[GenerateOutput, None],
             request: ChatCompletionRequest,
+            generate_config: GenerateConfig,
             input_token_length: int,
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        # TODO(wangyin): maybe deal with the case of multiple returns.
         index = 0
-        yield StreamResponseObject(
-            choices=[ChatCompletionResponseStreamChoice(
-                index=index,
-                delta=DeltaMessage(
-                    role=RoleEnum.assistant,
-                ),
-            )]
-        )
-
         output_string = ""
         output_length = 0
         responded_string = ""
@@ -326,9 +318,21 @@ class QwenRenderer(CustomChatRenderer):
         output_token_length = 0
         finish_reason: Optional[FinisheReason] = None
         generating_function_call = False
+        stop_word_slice_list = get_stop_word_slice_list(generate_config.stop_words_str)
 
         async for output in output_generator:
-            processed_output = self._process_output_ids_tensor(input_token_length, output.output_ids)
+            if output_token_length == 0:
+                yield StreamResponseObject(
+                    choices=[ChatCompletionResponseStreamChoice(
+                        index=index,
+                        delta=DeltaMessage(
+                            role=RoleEnum.assistant,
+                        ),
+                    )]
+                )
+
+            processed_output = self._process_output_ids_tensor(
+                input_token_length, output.output_ids, output.finished)
             output_string = processed_output.output_str.strip()
             output_length = len(processed_output.output_str)
             finish_reason = processed_output.finish_reason
@@ -342,8 +346,11 @@ class QwenRenderer(CustomChatRenderer):
                 continue
 
             if (output_length > responded_length + len('\nAction:')):
-                delta_string = output_string[responded_length : output_length - len('Action:')]
-                responded_string = output_string[: output_length - len('Action:')]
+                delta_string = output_string[responded_length : output_length - len('\nAction:')]
+                trunc_string = truncate_response_with_stop_words(delta_string, stop_word_slice_list)
+                if trunc_string != delta_string:
+                    continue
+                responded_string = output_string[: output_length - len('\nAction:')]
                 responded_length = len(responded_string)
 
                 yield StreamResponseObject(
@@ -363,7 +370,7 @@ class QwenRenderer(CustomChatRenderer):
         if (generating_function_call):
             function_message = self._parse_function_response(output_string[responded_length:])
             if (function_message == None):
-                logging.warn(f"output [{output_string}] failed to parse function call. "
+                logging.warn(f"output [{output_string}] failed to parse function from [{responded_length}]. "
                                 "regarded as normal output.")
             else:
                 finish_reason = FinisheReason.function_call
@@ -387,13 +394,19 @@ class QwenRenderer(CustomChatRenderer):
             finish_reason = FinisheReason.stop
 
         if responded_length < output_length:
+            index += 1
             yield StreamResponseObject(
                 choices=[ChatCompletionResponseStreamChoice(
                     index=index,
                     delta=DeltaMessage(
-                        content=output_string[responded_length:],
+                        content=truncate_response_with_stop_words(output_string[responded_length:], generate_config.stop_words_str),
                     ),
                 )],
+                usage=UsageInfo(
+                    prompt_tokens=input_token_length,
+                    total_tokens=input_token_length + output_token_length,
+                    completion_tokens=output_token_length
+                )
             )
 
         yield StreamResponseObject(
@@ -408,5 +421,18 @@ class QwenRenderer(CustomChatRenderer):
                 prompt_tokens=input_token_length,
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length
-            )
+            ),
+            aux_info=output.aux_info if request.aux_info else None
         )
+
+    def get_renderer_info(self) -> RendererInfo:
+        renderer_info = super().get_renderer_info()
+        if self.template_chat_renderer:
+            renderer_info.template = self.template_chat_renderer.chat_template
+        return renderer_info
+
+register_renderer('qwen', QwenRenderer)
+register_renderer('qwen_7b', QwenRenderer)
+register_renderer('qwen_13b', QwenRenderer)
+register_renderer('qwen_1b8', QwenRenderer)
+register_renderer('qwen_2', QwenRenderer)

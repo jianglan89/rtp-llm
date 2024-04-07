@@ -16,16 +16,21 @@
 
 #pragma once
 
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #include <assert.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include "src/fastertransformer/utils/cuda_utils.h"
 
-namespace fastertransformer {
+namespace fastertransformer
+{
 
 template <typename T>
 void invokeGeneralRmsNorm(T* out, const T* input, const T* gamma, const T* beta, const float eps, const int tokens,
     const int hidden_dim, cudaStream_t stream = 0, const float* scale = nullptr, float* dynamic_scale = nullptr,
     int8_t* out_quant = nullptr);
 
+template <typename T>
+void invokeAddBiasResidualRmsNorm(T* output, T* normed_output, const T* input, const T* bias, const T* residual,
+    const T* gamma, const T* beta, const float eps, const int tokens, const int hidden_dim, cudaStream_t stream = 0,
+    const float* scale = nullptr, float* dynamic_scale = nullptr, int8_t* out_quant = nullptr);
 } // namespace fastertransformer

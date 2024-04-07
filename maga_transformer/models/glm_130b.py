@@ -6,12 +6,9 @@ from maga_transformer.model_factory_register import register_model
 class Glm130B(ChatGlm):
     def __init__(self, config: GptInitModelParameters):
         super().__init__(config)
-        self.bos_id = 150004
-        if self.tokenizer:
-            self.bos_id = self.tokenizer.bos_token_id
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=96,
             size_per_head=128,
@@ -20,7 +17,6 @@ class Glm130B(ChatGlm):
             norm_type='layernorm',
             rotary_embedding_dim=128,
             rotary_embedding_style=1,
-            use_gated_activation=True,
             add_bias_linear=True,
             layer_num=70,
             max_seq_len=2048,

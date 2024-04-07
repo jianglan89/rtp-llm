@@ -16,8 +16,8 @@
 
 #include "src/fastertransformer/layers/DynamicDecodeLayer.h"
 #include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
-#include "src/fastertransformer/utils/nccl_utils.h"
+
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 
 namespace ft = fastertransformer;
 namespace th = torch;
@@ -147,6 +147,8 @@ public:
                  th::optional<th::Tensor> normed_scores,
                  th::optional<th::Tensor> min_normed_scores,
                  th::optional<th::Tensor> num_beams) override;
+
+    void forward(ft::TensorMap &input_tensors, ft::TensorMap &output_tensors);
 
     void broadcastFromLastPipeline(std::vector<th::Tensor> tensors) override;
 

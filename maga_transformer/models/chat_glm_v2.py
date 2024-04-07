@@ -9,11 +9,9 @@ from maga_transformer.models.gpt import GPT
 from maga_transformer.model_factory_register import register_model
 
 class ChatGlmV2(GPT):
-    def load_tokenizer(self):
-        self.tokenizer = None
-        if self.config.tokenizer_path:
-            self.tokenizer = ChatGLMTokenizer.from_pretrained(self.config.tokenizer_path)
-            self.config.special_tokens.eos_token_id = self.tokenizer.tokenizer.eos_id
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        return ChatGLMTokenizer.from_pretrained(config.tokenizer_path)
 
     @staticmethod
     def get_weight_cls():
@@ -53,6 +51,7 @@ class ChatGlmV2(GPT):
             config.prefix_projection = config_json['prefix_projection']
         config.special_tokens.eos_token_id = config_json['eos_token_id']
         config.src_quantization_bit = config_json.get('quantization_bit', 0)
+        config.rotary_embedding_dim = config.size_per_head
         config = cls.get_rotary_embedding_scale(config, config_json)
         return config
     
@@ -79,7 +78,6 @@ class ChatGlmV2(GPT):
     def modify_config(config):
         config.special_tokens.eos_token_id = 2
         config.use_attention_linear_bias = False
-        config.use_gated_activation = True
         config.activation_type = "SiGLU"
         config.norm_type = "rmsnorm"
         config.rotary_embedding_dim = 128
@@ -87,8 +85,8 @@ class ChatGlmV2(GPT):
         
         return config
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict is not None:
             config = ChatGlmV2.from_huggingface(ChatGlmV2, config_dict)
@@ -97,5 +95,5 @@ class ChatGlmV2(GPT):
         config = ChatGlmV2.modify_config(config)
         return config
 
-register_model('chatglm2', ChatGlmV2)
+register_model('chatglm2', ChatGlmV2, ["ChatGLMModel"], ["THUDM/chatglm2-6b", "THUDM/chatglm2-6b-int4", "THUDM/chatglm2-6b-32k"])
 register_model('chat_glm_2', ChatGlmV2)

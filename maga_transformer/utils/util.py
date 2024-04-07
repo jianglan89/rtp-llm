@@ -145,12 +145,13 @@ def to_cuda(tensor: torch.Tensor) -> torch.Tensor:
 def to_cpu(tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops.fastertransformer.async_copy_to_cpu(tensor)
 
+#TODO(xinfei.sxf) split this class
 class WEIGHT_TYPE(Enum):
     INT4 = ["int4"]
     INT8 = ["int8"]
-    FP16 = ["float16", "fp16"]
-    FP32 = ["float32", "fp32"]
-    BF16 = ["bfloat16", "bp16", "bf16"]
+    FP16 = ["fp16", "float16"]
+    FP32 = ["fp32", "float32"]
+    BF16 = ["bf16", "bfloat16","bp16"]
     @classmethod
     def from_str(cls, value: str) -> 'WEIGHT_TYPE':
         lower_value = value.lower()
@@ -166,10 +167,12 @@ def get_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
     weight_type_str = env_param.get("WEIGHT_TYPE", None)
     if weight_type_str:
         weight_type = WEIGHT_TYPE.from_str(weight_type_str)
+        return weight_type
     else:
         int8_mode = int(env_param.get("INT8_MODE", "0"))
-        weight_type = WEIGHT_TYPE.INT8 if int8_mode  == 1 else WEIGHT_TYPE.FP16
-    return weight_type
+        if int8_mode == 1:
+            return WEIGHT_TYPE.INT8
+        return WEIGHT_TYPE.FP16
 
 def get_sp_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
     sp_weight_type_str = env_param.get("SP_WEIGHT_TYPE", None)

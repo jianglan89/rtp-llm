@@ -10,12 +10,12 @@ cc_library(
     ]),
     deps = [
         "//src/fastertransformer/cutlass/cutlass_extensions:cutlass_extensions",
-        "//src/fastertransformer/utils:utils_for_3rdparty",
-        "//src/fastertransformer/utils:utils_cu",
+        "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/cuda:cuda",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
-    include_prefix = "src",
+    # include_prefix = "src",
     copts = copts(),
     visibility = ["//visibility:public"],
     alwayslink = True,
@@ -50,10 +50,8 @@ cc_library(
         "cutlass_kernels/fpA_intB_gemm/*.h",
     ]),
     hdrs = glob([
-        "cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm_template.h",
-        "cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h",
+        "cutlass_kernels/fpA_intB_gemm/*.h",
     ]),
-    include_prefix = "src",
     deps = [
     	":cutlass_kernels_common",
         "@local_config_cuda//cuda:cuda",
@@ -106,6 +104,15 @@ cc_library(
 )
 
 cc_library(
+    name = "cutlass_headers",
+    deps = [
+        "@cutlass//:cutlass",
+        "@cutlass//:cutlass_utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cutlass_kernels_impl",
     deps = [
         ":fpA_intB_cu",
@@ -125,6 +132,8 @@ cc_library(
         "cutlass_kernels/moe_gemm/moe_gemm_kernels.h",
         "cutlass_kernels/moe_gemm/moe_kernels.h",
         "cutlass_kernels/cutlass_preprocessors.h",
+        "cutlass_kernels/weight_only_quant_op.h",
+        "cutlass_kernels/gemm_configs.h",
         "cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h",
         "cutlass_kernels/weightOnlyBatchedGemv/common.h"
     ],

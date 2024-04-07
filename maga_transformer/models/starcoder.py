@@ -12,7 +12,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
         weights = [
             WeightInfo(W.embedding, [CkptWeightInfo('transformer.wte.weight', identity)], identity),
             WeightInfo(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
-            WeightInfo(W.wpe, [CkptWeightInfo('transformer.wpe.weight', identity)], identity),
+            WeightInfo(W.positional_embedding, [CkptWeightInfo('transformer.wpe.weight', identity)], identity),
             WeightInfo(W.final_ln_gamma, [CkptWeightInfo('transformer.ln_f.weight', identity)], identity),
             WeightInfo(W.final_ln_beta, [CkptWeightInfo('transformer.ln_f.bias', identity)], identity),
         ]
@@ -48,9 +48,9 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
 StarcoderTokenizer = GPT2TokenizerFast
 
 class StarCoder(GPT):
-    def load_tokenizer(self):
-        self.tokenizer = StarcoderTokenizer.from_pretrained(self.config.tokenizer_path)
-        self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        return StarcoderTokenizer.from_pretrained(config.tokenizer_path)
 
     @staticmethod
     def get_weight_cls():
@@ -83,8 +83,8 @@ class StarCoder(GPT):
         config.has_post_decoder_layernorm = True
         return config
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict:
             config = StarCoder.from_huggingface(config_dict)

@@ -7,25 +7,24 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.tokenizer.tokenization_chatglm import ChatGLMTokenizer
 from maga_transformer.models.glm_weight import GlmWeightInfo
 from maga_transformer.models.gpt import GPT
-from maga_transformer.models.base_model import BaseTokenizer
 from maga_transformer.model_factory_register import register_model
 
 class ChatGlm(GPT):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        if os.environ.get('USE_BLOCK_CACHE', None) is not None:
-            raise Exception("chatglm kvcache style not support block cache")
-    def load_tokenizer(self):
-        self.tokenizer = ChatGLMTokenizer.from_pretrained(self.config.tokenizer_path)
-        self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
-        self.bos_id = self.tokenizer.bos_token_id
+        if os.environ.get('REUSE_CACHE', None) == "1":
+            raise Exception("chatglm kvcache style not support reuse block cache")
+
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        return ChatGLMTokenizer.from_pretrained(config.tokenizer_path)
 
     @staticmethod
     def get_weight_cls():
         return GlmWeightInfo
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict is not None:
             config = ChatGlm.from_huggingface(ChatGlm, config_dict)
@@ -44,7 +43,6 @@ class ChatGlm(GPT):
             norm_type='alphanorm',
             rotary_embedding_dim=128,
             rotary_embedding_style=2,
-            use_gated_activation=False,
             add_bias_linear=True,
             layer_num=28,
             max_seq_len=2048,
@@ -70,27 +68,28 @@ class ChatGlm(GPT):
         '''
         config = ChatGlm.default_config()
         config.head_num = config_json.get('num_attention_heads', config.head_num)
+        config.hidden_size = config_json.get('hidden_size', 4096)
         if config_json.get('multi_query_attention', False):
             config.head_num_kv = config_json['multi_query_group_num']
         else:
             config.head_num_kv = config.head_num
-        config.size_per_head = config_json.get('hidden_size', 4096) // config.head_num
+        config.size_per_head = config.hidden_size // config.head_num
         config.layer_num = config_json.get('num_layers', config.layer_num)
         config.max_seq_len = config_json.get('max_sequence_length', config.max_seq_len)
         config.vocab_size = config_json.get('vocab_size', config.vocab_size)
         config.weights_data_type = config_json.get('torch_dtype', config.weights_data_type)
         config.layernorm_eps = config_json.get('layernorm_epsilon', config.layernorm_eps)
         config.inter_size = config_json.get('inner_hidden_size', config.inter_size)
-
+        config.rotary_embedding_dim = config.size_per_head
         config.special_tokens.bos_token_id = config_json.get('bos_token_id', config.special_tokens.bos_token_id)
         config.special_tokens.eos_token_id = config_json.get('eos_token_id', config.special_tokens.eos_token_id)
         config.src_quantization_bit = config_json.get('quantization_bit', 0)
         return config
-    
 
     # override
-    def create_context_decoder_mask(self, input_lengths: torch.Tensor, max_input_length: int):
+    def create_context_decoder_mask(self, input_lengths: torch.Tensor):
         batch_size = len(input_lengths)
+        max_input_length = max(input_lengths)
         context_lengths = [int(x) - 1 for x in input_lengths]
         attention_mask = torch.ones(
             (max_input_length, max_input_length), dtype=torch.bool, device=self.device)\
@@ -103,5 +102,5 @@ class ChatGlm(GPT):
             attention_mask[b, input_length:, ...] = 0
         return attention_mask
 
-register_model('chatglm', ChatGlm)
+register_model('chatglm', ChatGlm, [], ["THUDM/chatglm-6b", "THUDM/chatglm-6b-int4", "THUDM/chatglm-6b-int4-qe", "THUDM/chatglm-6b-int8"])
 register_model('chat_glm', ChatGlm)

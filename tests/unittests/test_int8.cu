@@ -5,9 +5,9 @@
 #include <string>
 #include <vector>
 
-#include "src/fastertransformer/utils/cuda_utils.h"
-#include "src/fastertransformer/utils/memory_utils.h"
-#include "src/fastertransformer/utils/Tensor.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
+#include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/kernels/transpose_int8_kernels.h"
 
 #include <algorithm>
@@ -54,9 +54,9 @@ void reference_transpose_host(std::vector<int8_t>& a_t_host, const Tensor& a)
     std::vector<int8_t> a_host(a.size());
     cudaD2Hcpy(a_host.data(), a.getPtr<int8_t>(), a.size());
 
-    for (unsigned int i = 0; i < a.shape[0]; i++) {
-        for (unsigned int j = 0; j < a.shape[1]; j++) {
-            a_t_host[j * a.shape[0] + i] = a_host[i * a.shape[1] + j];
+    for (unsigned int i = 0; i < a.shape()[0]; i++) {
+        for (unsigned int j = 0; j < a.shape()[1]; j++) {
+            a_t_host[j * a.shape()[0] + i] = a_host[i * a.shape()[1] + j];
         }
     }
 }

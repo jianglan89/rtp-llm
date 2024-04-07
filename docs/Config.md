@@ -8,12 +8,11 @@
 | `MODEL_TYPE` | `str`, required | 模型类型 |
 | `MAX_SEQ_LEN` | `str`, optional | 输入+输出最大长度 |
 | `WEIGHT_TYPE` | `str`, optional | 模型加载使用的weight 类型:FP16/INT8 |
-| `ASYNC_MODE` | `str`, optional | 异步模式（1:打开，0:关闭），支持dynamic batching、paged (token) attention等优化 |
 | `CONCURRENCY_LIMIT` | `str`, optional | 模型最大并发数 |
 
 
 * `TOKENIZER_PATH` 和 `CHECKPOINT_PATH` 必须为本地路径。
-* `MODEL_TYPE` 目前支持 `chatglm``chat_glm``chatglm2``chat_glm_2``chatglm3``chat_glm_3``glm_130b``gpt_bigcode``wizardcoder``sgpt_bloom``sgpt_bloom_vector``bloom``llama``xverse``llava``baichuan``gpt_neox``qwen_7b``qwen_13b``qwen_1b8``qwen_vl``falcon``mpt``internlm``phi``aquila`
+* `MODEL_TYPE` 目前支持 `chatglm``chat_glm``chatglm2``chat_glm_2``chatglm3``chat_glm_3``glm_130b``gpt_bigcode``starcoder2``wizardcoder``sgpt_bloom``sgpt_bloom_vector``bloom``llama``gemma``xverse``llava``baichuan``gpt_neox``qwen_7b``qwen_13b``qwen_1b8``qwen_2``qwen_vl``falcon``mpt``internlm``phi``aquila`
 
 ## 高级选项
 | 环境变量名 | 类型 | 说明 |
@@ -22,7 +21,7 @@
 | `KV_CACHE_MEM_MB` | `str`, optional | kv cache 预留显存大小，单位(MB) |
 | `PRE_ALLOCATE_OP_MEM` | `str`, optional | 是否提前预分配显存,与KV_CACHE_MEM_MB配合使用 |
 | `TP_SPLIT_EMB_AND_LMHEAD` | `str`, optional | TensorParallel时是否切分Emb和LmHead计算(1:打开，0:关闭) |
-| `USE_BLOCK_CACHE` | `str`, optional | query之间复用kvcache |
+| `REUSE_CACHE` | `str`, optional | query之间复用kvcache |
 | `EXTRA_DATA_PATH` | `str`, optional | 除了ckpt/tokenizer,额外需要的数据,比如LLAVA的 VIT数据 |
 
 ## 注意事项
@@ -36,7 +35,6 @@
 | `model_type` | `str, default=''` | 模型类型 |
 | `ckpt_path` | `str, default=''` | 模型路径 |
 | `tokenizer_path` | `str, default=''` | tokenizer路径 |
-| `async_mode` | `bool, default=False`| 是否开启异步凑批模型 |
 | `weight_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | 模型weights量化类型 |
 | `act_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | 模型weights存储类型 |
 | `max_seq_len` | `bool, default=0` | beam search的个数 |

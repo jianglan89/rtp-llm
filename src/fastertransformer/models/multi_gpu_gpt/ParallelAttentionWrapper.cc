@@ -3,8 +3,8 @@
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 #include <type_traits>
 #include <cassert>
@@ -12,13 +12,13 @@
 namespace fastertransformer {
 
 template<typename T>
-bool ParallelAttentionWrapper<T>::CheckUseFMHA() {
-    char* fmha_env        = std::getenv("FMHA_ENABLE");
+bool ParallelAttentionWrapper<T>::CheckUseFMHA() const {
+    char* fmha_env        = std::getenv("ENABLE_FMHA");
     bool  fmha_enable     = (fmha_env == nullptr || std::string(fmha_env) != "OFF");
-    char* block_cache_env = std::getenv("USE_BLOCK_CACHE");
+    char* block_cache_env = std::getenv("REUSE_CACHE");
     bool  not_prefix_prompt =
         params_.pre_seq_len_ == 0 && (block_cache_env == nullptr || std::string(block_cache_env) != "1");
-    char* multi_task_prompt_env = std::getenv("MULTI_TASK_PROMPT"); 
+    char* multi_task_prompt_env = std::getenv("MULTI_TASK_PROMPT");
     bool use_medusa = params_.use_medusa_;
     char* sp_model_env = std::getenv("SP_MODEL_TYPE");
 
@@ -45,20 +45,25 @@ bool ParallelAttentionWrapper<T>::CheckUseFMHA() {
     }
     if (multi_task_prompt_env != nullptr) {
         FT_LOG_WARNING("FMHA not support multi_task_prompt");
-        return false;        
+        return false;
     }
     if (use_medusa) {
         FT_LOG_WARNING("FMHA not support medusa model");
-        return false;        
+        return false;
     }
     return true;
 }
 
 template<typename T>
-bool ParallelAttentionWrapper<T>::UseOpenSourceFMHA() {
+bool ParallelAttentionWrapper<T>::UseOpenSourceFMHA() const {
     bool use_open_source_fmha = CheckUseFMHA();
-    if (!(is_sm8x() || is_sm90())){
-        FT_LOG_WARNING("FMHA is disabled for pre-ampere");
+    if (!(is_sm8x() || is_sm90())) {
+        FT_LOG_WARNING("opensource FMHA is disabled for sm %d", get_sm());
+        use_open_source_fmha = false;
+    }
+    char* fmha_env = std::getenv("ENABLE_OPENSOURCE_FMHA");
+    if (fmha_env && std::string(fmha_env) == "OFF") {
+        FT_LOG_WARNING("opensource FMHA is disabled for by env");
         use_open_source_fmha = false;
     }
     return use_open_source_fmha;
@@ -66,17 +71,41 @@ bool ParallelAttentionWrapper<T>::UseOpenSourceFMHA() {
 
 
 template<typename T>
-bool ParallelAttentionWrapper<T>::UseTRTFMHA() {
+bool ParallelAttentionWrapper<T>::UseTRTFMHA() const {
     bool use_trt_fmha = CheckUseFMHA();
-    if (!(is_sm8x() || is_sm90())){
-        FT_LOG_WARNING("FMHA is disabled for pre-ampere");
+    if (!(is_sm8x() || is_sm90() || is_sm70())) {
+        FT_LOG_WARNING("TRT FMHA is disabled for sm %d", get_sm());
         use_trt_fmha = false;
     }
     if (params_.is_sparse_head_){
         FT_LOG_WARNING("TRT FMHA is disabled for sparse");
         use_trt_fmha = false;
     }
+    char* fmha_env = std::getenv("ENABLE_TRT_FMHA");
+    if (fmha_env && std::string(fmha_env) == "OFF") {
+        FT_LOG_WARNING("TRT FMHA is disabled for by env");
+        use_trt_fmha = false;
+    }
     return use_trt_fmha;
+}
+
+template<typename T>
+bool ParallelAttentionWrapper<T>::UseMultiBlockMode() const {
+    bool use_multi_block_mode = false;
+
+    char* multi_block_mode_env    = std::getenv("ENABLE_MULTI_BLOCK_MODE");
+    bool  multi_block_mode_enable = (multi_block_mode_env == nullptr || std::string(multi_block_mode_env) != "OFF");
+#if (CUDART_VERSION >= 11070)
+    if (!multi_block_mode_enable) {
+        FT_LOG_WARNING("MMHA multi_block_mode is disabled");
+        return false;
+    }
+    if (sm_ == 80 || sm_ >= 89) {
+        FT_LOG_INFO("MMHA multi_block_mode is enabled");
+        use_multi_block_mode = true;
+    }
+#endif
+    return use_multi_block_mode;
 }
 
 template<typename T>
@@ -93,7 +122,7 @@ void ParallelAttentionWrapper<T>::TRTFMHA(const ContextAttentionParams& params, 
     const int local_hidden_units_kv = num_kv_heads * head_size;
     const float q_scaling = q_scaling_;
 
-    const bool mPagedContextFMHA=false; 
+    const bool mPagedContextFMHA=false;
 
     KVBlockArray kv_cache_buffer;
     using BufferDataType = int64_t;
@@ -109,7 +138,7 @@ void ParallelAttentionWrapper<T>::TRTFMHA(const ContextAttentionParams& params, 
         mPagedContextFMHA ? params.batch_size * 2 * tensorrt_llm::kernels::TMA_DESC_SIZE_IN_BYTE * blocks_per_context_sequence : 0;
 
     int* cu_q_seqlens = params.cu_seqlens;
-    int* cu_kv_seqlens = params.cu_seqlens; 
+    int* cu_kv_seqlens = params.cu_seqlens;
     // TODO
     void* paged_kv_tma_desc = nullptr;
 
@@ -198,6 +227,7 @@ void ParallelAttentionWrapper<T>::OpenSourceFMHA(
     memset(&flash_fwd_params_, 0, sizeof(flash_fwd_params_));
     flash_fwd_params_.is_bf16 = std::is_same_v<__nv_bfloat16, T>;
 
+    // TODO(wangyin): pass hidden_units from params
     const int hidden_units          = num_heads * head_size;
     const int hidden_units_kv       = num_heads_kv * head_size;
     // Set the pointers and strides.
@@ -259,7 +289,7 @@ void ParallelAttentionWrapper<T>::OpenSourceFMHA(
     flash_fwd_params_.scale_softmax_rp_dropout = flash_fwd_params_.rp_dropout * flash_fwd_params_.scale_softmax;
     TORCH_CHECK(p_dropout < 1.f);
 
-    flash_fwd_params_.is_causal = true;
+    flash_fwd_params_.is_causal = params_.is_causal_;
     flash_fwd_params_.is_alibi  = false;
     if (linear_bias_slopes) {
         flash_fwd_params_.is_alibi           = true;
@@ -308,10 +338,6 @@ void ParallelAttentionWrapper<T>::forward(TensorMap*                output_tenso
     //      key_cache [batch, local_head_num, size_per_head // x, max_seq_len, x]
     //      value_cache [batch, local_head_num, max_seq_len, size_per_head]
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
-    FT_CHECK(output_tensors->at("key_cache").shape.size() == 4);
-    FT_CHECK(output_tensors->at("value_cache").shape.size() == 4
-             || output_tensors->at("value_cache").shape.size() == 3);
-
     Attention(output_tensors, input_tensors, attention_weights);
 
     // PUSH_RANGE(stream_, "all reduce sum");
@@ -350,7 +376,7 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
                                local_hidden_units_rt,
                                nullptr,
                                nullptr,
-                               params_.int8_mode_,
+                               params_.quant_algo_->int8_mode_,
                                stream_);
         qkv_buf_3_input = qkv_buf_;
         sync_check_cuda_error();
@@ -371,23 +397,26 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
 #endif
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
-    gemm_runner_->Gemm(batch_size,
-                       lora_input_lengths,
-                       h_token_num,
+    gemm_runner_->Gemm(h_token_num,
                        hidden_units_,
                        local_hidden_units_rt,
                        qkv_buf_3_input,
                        &attention_weights->attention_output_weight,
-                       attention_out,
-                       lora_ids, // lora_ids
-                       params_.int8_mode_,
-                       use_sparse,
-                       mixed_gemm_workspace_,
-                       mixed_gemm_ws_bytes_,
-                       m_padded);
+                       attention_out);
+    
+    // lora
+    lora_gemm_->applyLoRA(h_token_num,
+                          batch_size,
+                          lora_input_lengths,
+                          local_hidden_units_rt,
+                          hidden_units_,
+                          lora_ids,
+                          attention_weights->attention_output_weight.lora_weights,
+                          qkv_buf_3_input,
+                          attention_out);
 
     POP_RANGE;
-    print_bsd(layer_id, "attn out", attention_out, 1, h_token_num, local_hidden_units_);
+    // print_bsd(layer_id, "attn out", attention_out, 1, h_token_num, local_hidden_units_);
 }
 
 template<typename T>
@@ -416,24 +445,28 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
 #endif
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
-    gemm_runner_->Gemm(batch_size,
-                       lora_input_lengths,
-                       h_token_num,
+    gemm_runner_->Gemm(h_token_num,
                        local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
                        hidden_units_,
                        attention_input,
                        &attention_weights->query_weight,
-                       qkv_buf_,
-                       lora_ids, // lora_ids
-                       params_.int8_mode_,
-                       use_sparse,
-                       mixed_gemm_workspace_,
-                       mixed_gemm_ws_bytes_,
-                       m_padded);
+                       qkv_buf_);
+    
+    // lora
+
+    lora_gemm_->applyLoRA(h_token_num,
+                          batch_size,
+                          lora_input_lengths,
+                          hidden_units_,
+                          local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
+                          lora_ids,
+                          attention_weights->query_weight.lora_weights,
+                          attention_input,
+                          qkv_buf_);
 
     int k_start = local_hidden_units_rt;
     int v_start = local_hidden_units_rt + local_hidden_units_kv_rt;
-    print_bsd(layer_id, "q", qkv_buf_, h_token_num, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt, 0, 4);
+    print_bsd(layer_id, "parallel attention q", qkv_buf_, h_token_num, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt, 0, 4);
     print_bsd(layer_id,
               "k",
               qkv_buf_,
@@ -457,20 +490,22 @@ template<typename T>
 void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output_tensors,
                                                 TensorMap*                input_tensors,
                                                 const AttentionWeight<T>* attention_weights)
-{
+{   
+    if (input_tensors->isExist("use_kvcache") && !input_tensors->getVal<bool>("use_kvcache")) {
+        throw std::runtime_error("use_kvcahe == false should not do self attention!");
+    }
     const int  layer_id                = input_tensors->getVal<int>("layer_id");
     const int  generate_batch_size     = input_tensors->getVal<int>("generate_batch_size");
     const int* cache_indir             = input_tensors->getPtr<int>("cache_indirection", nullptr);
-    const int  beam_width              = cache_indir ? input_tensors->at("cache_indirection").shape[1] : 1;
+    const int  beam_width              = cache_indir ? input_tensors->at("cache_indirection").shape()[1] : 1;
     const T*   relative_attention_bias = input_tensors->getPtr<T>("relative_attention_bias", nullptr);
     const int  relative_attention_bias_stride =
-        relative_attention_bias ? input_tensors->at("relative_attention_bias").shape[3] : 0;
+        relative_attention_bias ? input_tensors->at("relative_attention_bias").shape()[3] : 0;
     const int64_t* block_pointers       = input_tensors->getPtr<int64_t>("block_pointers", nullptr);
     const int64_t* block_scale_pointers = input_tensors->getPtr<int64_t>("block_scale_pointers", nullptr);
-    const int      max_blocks_per_batch = block_pointers ? input_tensors->at("block_pointers").shape[3] : 0;
+    const int      max_blocks_per_batch = block_pointers ? input_tensors->at("block_pointers").shape()[3] : 0;
     const int      local_head_num       = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
     const int    local_head_num_kv = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
-    const bool   has_ia3           = input_tensors->isExist("ia3_tasks");
     KVBlockArray kv_block_array(generate_batch_size, max_blocks_per_batch, params_.seq_size_per_block_, 0);
     kv_block_array.data = const_cast<int64_t*>(block_pointers);
     if (params_.int8_kv_cache_) {
@@ -510,9 +545,9 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
         relative_attention_bias_stride,
         input_tensors->getPtr<T>("linear_bias_slopes", nullptr),
         input_tensors->getPtr<bool>("masked_tokens", nullptr),
-        params_.int8_mode_ == 2 ? attention_weights->query_weight.scale_out : nullptr,
-        params_.int8_mode_ == 2 ? attention_weights->attention_output_weight.scale : nullptr,
-        params_.int8_mode_,
+        params_.quant_algo_->int8_mode_ == 2 ? attention_weights->query_weight.scale_out : nullptr,
+        params_.quant_algo_->int8_mode_ == 2 ? attention_weights->attention_output_weight.scale : nullptr,
+        params_.quant_algo_->int8_mode_,
         multi_block_mode_,
         max_seq_len_tile_,
         partial_out_,
@@ -529,14 +564,16 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                                    TensorMap*                input_tensors,
                                                    const AttentionWeight<T>* attention_weights)
 {
+    const bool use_kvcache = !input_tensors->isExist("use_kvcache") || input_tensors->getVal<bool>("use_kvcache");
     const int  generate_batch_size      = input_tensors->getVal<int>("generate_batch_size");
-    const int  h_token_num              = input_tensors->at("input_query").shape[0];
+    const int  h_token_num              = input_tensors->at("input_query").shape()[0];
     const int  context_h_token_num      = h_token_num - generate_batch_size;
     const int  layer_id                 = input_tensors->getVal<int>("layer_id");
-    const int  context_batch_size       = input_tensors->at("attention_mask").shape[0];
-    const int  context_seq_len          = input_tensors->at("attention_mask").shape[2];
+    const int  context_batch_size       = input_tensors->getVal<int>("context_batch_size");
+    const int  max_context_seq_length   = input_tensors->getVal<int>("max_context_seq_length");
     const int  min_prefix_length        = input_tensors->getVal<int>("min_prefix_length", 0);
     const T**  d_prefix_prompt_batch    = input_tensors->getPtr<const T*>("d_prefix_prompt_batch", nullptr);
+    const T*   attention_mask           = input_tensors->getPtr<const T>("attention_mask", nullptr);
     const int* d_prefix_prompt_lengths_ = input_tensors->getPtr<int>("d_prefix_prompt_lengths", nullptr);
     const int* d_prefix_prompt_lengths =
         d_prefix_prompt_lengths_ ? d_prefix_prompt_lengths_ + generate_batch_size : d_prefix_prompt_lengths_;
@@ -549,17 +586,18 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     int64_t* block_pointers_       = input_tensors->getPtr<int64_t>("block_pointers", nullptr);
     int64_t* host_block_pointers_  = input_tensors->getPtr<int64_t>("host_block_pointers", nullptr);
     const int64_t* block_scale_pointers_ = input_tensors->getPtr<int64_t>("block_scale_pointers", nullptr);
-    const int      max_blocks_per_batch  = block_pointers_ ? input_tensors->at("block_pointers").shape[3] : 0;
+    const int      max_blocks_per_batch  = block_pointers_ ? input_tensors->at("block_pointers").shape()[3] : 0;
     const int64_t* block_pointers =
         block_pointers_ ? block_pointers_ + generate_batch_size * 2 * max_blocks_per_batch : block_pointers_;
     const int64_t* block_scale_pointers = block_scale_pointers_ ?
                                               block_scale_pointers_ + generate_batch_size * 2 * max_blocks_per_batch :
                                               block_scale_pointers_;
 
-    const int max_prompt_length =
-        input_tensors->at("attention_mask").shape[3] - input_tensors->at("attention_mask").shape[2];
-    const bool count_prefix_length  = input_tensors->getVal<bool>("count_prefix_length", false);
-    const int* input_lengths        = input_tensors->getPtr<int>("input_lengths");
+    const int  max_prompt_length   = attention_mask == nullptr ? 0 :
+                                                                 input_tensors->at("attention_mask").shape()[3]
+                                                                  - input_tensors->at("attention_mask").shape()[2];
+    const bool count_prefix_length = input_tensors->getVal<bool>("count_prefix_length", false);
+    const int* input_lengths       = input_tensors->getPtr<int>("input_lengths");
 
     const int local_head_num        = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
     const int local_head_num_kv     = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
@@ -570,16 +608,18 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     T* qkv_buf_2 = qkv_buf_2_ + generate_batch_size * local_hidden_units_rt;
 
     KVBlockArray kv_block_array(context_batch_size, max_blocks_per_batch, params_.seq_size_per_block_, 0);
-    kv_block_array.data        = const_cast<int64_t*>(block_pointers);
     KvCacheDataType cache_type = KvCacheDataType::BASE;
-    if (params_.int8_kv_cache_) {
-        kv_block_array.scale     = const_cast<int64_t*>(block_scale_pointers);
-        kv_block_array.int8_mode = true;
-        cache_type               = KvCacheDataType::INT8;
+    if (use_kvcache) {
+        kv_block_array.data        = const_cast<int64_t*>(block_pointers);        
+        if (params_.int8_kv_cache_) {
+            kv_block_array.scale     = const_cast<int64_t*>(block_scale_pointers);
+            kv_block_array.int8_mode = true;
+            cache_type               = KvCacheDataType::INT8;
+        }
     }
 
-    T*                                attention_mask = input_tensors->at("attention_mask").getPtr<T>();
     PrefixPromptBatchWeightsParam<T>* param          = new PrefixPromptBatchWeightsParam<T>();
+
     if (d_prefix_prompt_lengths && d_prefix_prompt_batch) {
         throw std::runtime_error("not support both prefix_prompt and repeat_prompt");
     }
@@ -601,7 +641,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         // q_buf_2_, k_buf_2_ and v_buf_2_ are continuousd
         cudaMemsetAsync(q_buf_2_,
                         0,
-                        context_batch_size * (context_seq_len + max_prompt_length)
+                        context_batch_size * (max_context_seq_length + max_prompt_length)
                             * (local_hidden_units_rt + 2 * local_hidden_units_kv_rt) * sizeof(T),
                         stream_);
     }
@@ -617,7 +657,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                    padding_offset,
                                    cu_seqlens,
                                    context_batch_size,
-                                   context_seq_len,
+                                   max_context_seq_length,
                                    context_h_token_num,
                                    local_head_num,
                                    local_head_num_kv,
@@ -632,7 +672,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                    params_.logn_seq_len_,
                                    params_.use_logn_attn_,
                                    attention_weights->query_weight.scale_out,
-                                   params_.int8_mode_,
+                                   params_.quant_algo_->int8_mode_,
                                    stream_);
     POP_RANGE;
     print_bhsd(layer_id,
@@ -640,21 +680,21 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                q_buf_2_,
                context_batch_size,
                local_head_num,
-               context_seq_len,
+               max_context_seq_length,
                params_.size_per_head_);
     print_bhsd(layer_id,
                "k bias rotary",
                k_buf_2_,
                context_batch_size,
                local_head_num_kv,
-               context_seq_len + max_prompt_length,
+               max_context_seq_length + max_prompt_length,
                params_.size_per_head_);
     print_bhsd(layer_id,
                "v bias rotary",
                v_buf_2_,
                context_batch_size,
                local_head_num_kv,
-               context_seq_len + max_prompt_length,
+               max_context_seq_length + max_prompt_length,
                params_.size_per_head_);
 
     sync_check_cuda_error();
@@ -665,18 +705,20 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     // length_base means some blocks is reused in kvcache and not need to copy
 
     PUSH_RANGE(stream_, "kv_cache");
-    invokeTranspose4dBatchMajor(k_buf_2_,
-                                v_buf_2_,
-                                kv_block_array,
-                                context_batch_size,
-                                max_prompt_length + context_seq_len,  // max input length + prefix prompt length
-                                params_.size_per_head_,
-                                local_head_num_kv,
-                                cache_type,
-                                nullptr,  // kvScaleOrigQuant
-                                input_lengths + generate_batch_size,
-                                d_prefix_prompt_lengths,
-                                stream_);
+    if (use_kvcache) {
+        invokeTranspose4dBatchMajor(k_buf_2_,
+                                    v_buf_2_,
+                                    kv_block_array,
+                                    context_batch_size,
+                                    max_prompt_length + max_context_seq_length,  // max input length + prefix prompt length
+                                    params_.size_per_head_,
+                                    local_head_num_kv,
+                                    cache_type,
+                                    nullptr,  // kvScaleOrigQuant
+                                    input_lengths + generate_batch_size,
+                                    d_prefix_prompt_lengths,
+                                    stream_);
+    }
     POP_RANGE;
     // IDEA : after this, k_cache = (batch_size, num_heads, Dh/x, prefix_prompt_len + L, x)
     // k_cache = (batch_size, num_heads, prefix_prompt_len + L, Dh)
@@ -684,10 +726,9 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
 
     // NOTE: qkv buffer shape (batch_size, num_heads,L or prompt_len + L, Dh)
     const cudaDataType_t gemm_data_type      = getCudaDataType<T>();
-    const int            attention_seq_len_1 = context_seq_len;                      // q length
-    const int            attention_seq_len_2 = max_prompt_length + context_seq_len;  // kv length
+    const int            attention_seq_len_1 = max_context_seq_length;                      // q length
+    const int            attention_seq_len_2 = max_prompt_length + max_context_seq_length;  // kv length
     const T              qk_scale               = static_cast<T>(1.0f / sqrtf(params_.size_per_head_ * 1.0f));
-    const int            max_context_seq_length = input_tensors->getVal<int>("max_context_seq_length");
     if (use_trt_fmha_) {
         ContextAttentionParams context_attention_params{qkv_buf,                 // attention_input
                                                         max_context_seq_length,  // max_context_q_len
@@ -700,7 +741,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                                         context_batch_size,    // batch_size
                                                         context_h_token_num,   // localNbTokens,
                                                         max_blocks_per_batch,  // max_blocks_per_sequence
-                                                        linear_bias_slopes};
+                                                        linear_bias_slopes != nullptr};
         TRTFMHA(context_attention_params, stream_);
     }
     else if (use_open_source_fmha_) {
@@ -718,6 +759,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         sync_check_cuda_error();
     }
     else {
+        FT_CHECK_WITH_INFO(attention_mask != nullptr, "attention mask should not be nullptr when not use flash attention");
         if (is_qk_buf_float_ == true && gemm_data_type != CUDA_R_32F) {
             PUSH_RANGE(stream_, "Q*K");
             cublas_wrapper_->stridedBatchedGemm(
@@ -853,7 +895,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                local_head_num,
                                params_.size_per_head_,
                                attention_weights->attention_output_weight.scale,
-                               params_.int8_mode_,
+                               params_.quant_algo_->int8_mode_,
                                stream_);
             sync_check_cuda_error();
         }
@@ -867,7 +909,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                                      params_.size_per_head_,
                                                      padding_offset,
                                                      attention_weights->attention_output_weight.scale,
-                                                     params_.int8_mode_,
+                                                     params_.quant_algo_->int8_mode_,
                                                      stream_);
         }
         POP_RANGE;
@@ -887,15 +929,20 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
     int                 max_context_seq_len = 0;
     int                 max_context_seq_len_with_prefix = 0;
     const int           layer_id            = input_tensors->getVal<int>("layer_id");
-    const int           h_token_num         = input_tensors->at("input_query").shape[0];
+    const int           h_token_num         = input_tensors->at("input_query").shape()[0];
     // lora
     int* lora_ids = input_tensors->getPtr<int>("lora_ids", nullptr);
     int batch_size = context_batch_size + generate_batch_size;
     const int* lora_input_lengths = input_tensors->getPtr<int>("lora_input_lengths", nullptr);
 
     if (context_batch_size) {
-        max_context_seq_len_with_prefix = input_tensors->at("attention_mask").shape[3];
-        max_context_seq_len             = input_tensors->at("attention_mask").shape[2];
+        if (input_tensors->isExist("attention_mask")) {
+            max_context_seq_len_with_prefix = input_tensors->at("attention_mask").shape()[3];
+            max_context_seq_len             = input_tensors->at("attention_mask").shape()[2];
+        } else {
+            max_context_seq_len = input_tensors->getVal<int>("max_context_seq_length");
+            max_context_seq_len_with_prefix = max_context_seq_len;
+        }
     }
     PUSH_RANGE(stream_, "attention_buffer_alloc");
     allocateBuffer(h_token_num, context_batch_size, generate_batch_size, max_context_seq_len, max_context_seq_len_with_prefix, !(use_open_source_fmha_||use_trt_fmha_), multi_block_mode_);
@@ -923,6 +970,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
                                                       NcclParam               tensor_para,
                                                       cudaStream_t            stream,
                                                       cublasMMWrapper*        cublas_wrapper,
+                                                      tc::QuantAlgo           quant_algo,
                                                       IAllocator*             allocator,
                                                       bool                    is_free_buffer_after_forward,
                                                       bool                    is_qk_buf_float,
@@ -930,41 +978,33 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
 
     BaseAttentionLayer<T>(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, sparse),
     params_(gpt_init_parameter),
-    hidden_units_(gpt_init_parameter.size_per_head_ * gpt_init_parameter.head_num_),
+    hidden_units_(gpt_init_parameter.hidden_size_),
     local_head_num_(gpt_init_parameter.head_num_ / tensor_para.world_size_),
     local_head_num_kv_(
         gpt_init_parameter.head_num_kv_ == 1 ? 1 : gpt_init_parameter.head_num_kv_ / tensor_para.world_size_),
-    local_hidden_units_(local_head_num_ * gpt_init_parameter.size_per_head_),
+    local_hidden_units_(gpt_init_parameter.hidden_size_ / tensor_para.world_size_),
     is_qk_buf_float_(is_qk_buf_float),
-    weight_only_int8_fc_runner_(
-        gpt_init_parameter.int8_mode_ == 1 ? std::make_shared<CutlassFpAIntBGemmRunner<T, uint8_t>>() : nullptr),
-    gemm_runner_(
-        std::make_shared<GemmRunner<T>>(sparse, stream, allocator, cublas_wrapper, weight_only_int8_fc_runner_)),
+    lora_gemm_(std::make_shared<LoraGemm<T>>(stream, allocator, cublas_wrapper)),
+    gemm_runner_(std::make_shared<GemmRunner<T>>(stream, allocator, cublas_wrapper, quant_algo)),
     local_layer_head_num_(getLocalParameter(gpt_init_parameter.layer_head_num_, tensor_para.world_size_)),
     local_layer_head_num_kv_(getLocalParameter(gpt_init_parameter.layer_head_num_kv_, tensor_para.world_size_)),
     q_scaling_(1.0f),
-    tensor_para_(tensor_para)
-{
-#if (CUDART_VERSION >= 11070)
-    if (sm_ == 80 || sm_ >= 89) {
-        multi_block_mode_ = true;
-    }
-#endif
+    tensor_para_(tensor_para) {
+    multi_block_mode_ = UseMultiBlockMode();
 
-    if (params_.int8_mode_ == 2) {
+    if (params_.quant_algo_->int8_mode_ == 2) {
         abort();
     }
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    // dispatcher_fp16.reset(new FusedMHARunnerFP16v2(local_head_num_, gpt_init_parameter.size_per_head_, sm_, 1.0f));
 
     tensorrt_llm::kernels::Data_type data_type;
-    if constexpr(std::is_same<T, half>::value){
+    if constexpr (std::is_same<T, half>::value) {
         data_type = tensorrt_llm::kernels::DATA_TYPE_FP16;
-    } 
+    }
 #ifdef ENABLE_BF16
-    if constexpr(std::is_same<T, __nv_bfloat16>::value){
+    if constexpr (std::is_same<T, __nv_bfloat16>::value) {
         data_type = tensorrt_llm::kernels::DATA_TYPE_BF16;
-    } 
+    }
 #endif
 
 #if (CUDART_VERSION >= 12000)
@@ -973,11 +1013,27 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
         // Load kernels for contiguous cache and paged kv cache at the same time.
         mFMHARunner.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(
             data_type, local_head_num_, params_.size_per_head_, q_scaling_));
-        // Set flags: force_fp32_acc, is_s_padded, causal_mask, num_kv_heads.
-        mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, true, local_head_num_kv_);
+        if (mFMHARunner -> fmha_supported()) {
+            FT_LOG_INFO("use TRT fmha");
+            // Set flags: force_fp32_acc, is_s_padded, causal_mask, num_kv_heads.
+            mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, params_.is_causal_, local_head_num_kv_);
+        }
+        else {
+            FT_LOG_WARNING("FMHA is disabled for size_per_head %d", params_.size_per_head_);
+            use_trt_fmha_ = false;
+        }
     }
 #endif
     use_open_source_fmha_ = UseOpenSourceFMHA();
+    if (use_open_source_fmha_) {
+        FT_LOG_INFO("use open source fmha");
+    }
+}
+
+template<typename T>
+bool ParallelAttentionWrapper<T>::UseFMHA()
+{
+    return use_open_source_fmha_ || use_trt_fmha_; 
 }
 
 template<typename T>
@@ -1001,24 +1057,24 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
 
     // const auto type_size = int8_mode_ == 2 ? sizeof(int8_t) : sizeof(T);
     // NOTE (perkzz): use sizeof(T) here for cutlass int8 kernels.
+    const auto qkv_hidden_size = local_head_num_ * params_.size_per_head_;
+    const auto qkv_merged_size = qkv_hidden_size + 2 * local_head_num_kv_ * params_.size_per_head_;
     qkv_buf_   = (T*)allocator_->reMalloc(qkv_buf_,
-                                        sizeof(T) * h_token_num
-                                            * (local_hidden_units_ + 2 * local_head_num_kv_ * params_.size_per_head_),
+                                        sizeof(T) * h_token_num * qkv_merged_size,
                                         true);
     q_buf_2_   = (T*)allocator_->reMalloc(q_buf_2_,
-                                        sizeof(T) * context_batch_size * seq_len_with_prefix
-                                            * (local_hidden_units_ + 2 * local_head_num_kv_ * params_.size_per_head_),
+                                        sizeof(T) * context_batch_size * seq_len_with_prefix * qkv_merged_size,
                                         false);
     k_buf_2_   = q_buf_2_ + context_batch_size * seq_len_with_prefix * local_head_num_ * params_.size_per_head_;
     v_buf_2_   = k_buf_2_ + context_batch_size * seq_len_with_prefix * local_head_num_kv_ * params_.size_per_head_;
-    qkv_buf_2_ = (T*)allocator_->reMalloc(qkv_buf_2_, sizeof(T) * h_token_num * local_hidden_units_, false);
+    qkv_buf_2_ = (T*)allocator_->reMalloc(qkv_buf_2_, sizeof(T) * h_token_num * qkv_hidden_size, false);
 
     // save memory usage when using fmha
     if (allocate_qk_buf) {
         qk_buf_ = (T*)allocator_->reMalloc(
             qk_buf_, sizeof(T) * context_batch_size * local_head_num_ * seq_len * seq_len_with_prefix, true);
         qkv_buf_3_ =
-            (T*)allocator_->reMalloc(qkv_buf_3_, sizeof(T) * context_batch_size * seq_len * local_hidden_units_, true);
+            (T*)allocator_->reMalloc(qkv_buf_3_, sizeof(T) * context_batch_size * seq_len * qkv_hidden_size, true);
     }
     else {
         softmax_lse_ = (float*)allocator_->reMalloc(
@@ -1034,15 +1090,6 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
                                                          true);
             // qk_buf_ = (T *)qk_buf_float_;
         }
-    }
-
-    if (params_.int8_mode_ == 1) {
-        // We use max_size for n and k since we reuse buffers for both FCs and want to allocate the max
-        // possible memory that would be required by any of the individual gemms.
-        const int max_size =
-            std::max(hidden_units_, local_hidden_units_ + 2 * local_head_num_kv_ * params_.size_per_head_);
-        mixed_gemm_ws_bytes_  = weight_only_int8_fc_runner_->getWorkspaceSize(h_token_num, max_size, max_size);
-        mixed_gemm_workspace_ = (char*)allocator_->reMalloc(mixed_gemm_workspace_, mixed_gemm_ws_bytes_, false);
     }
 
     if(multi_block_mode_){

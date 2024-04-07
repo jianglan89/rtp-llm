@@ -21,11 +21,11 @@
 
 #include "src/fastertransformer/layers/BaseLayer.h"
 #include "src/fastertransformer/layers/attention_layers/AttentionWeight.h"
-#include "src/fastertransformer/utils/Tensor.h"
-#include "src/fastertransformer/utils/allocator.h"
-#include "src/fastertransformer/utils/cublasMMWrapper.h"
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/core/Tensor.h"
+#include "src/fastertransformer/core/allocator.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 
 namespace fastertransformer {
 
@@ -92,6 +92,8 @@ class BaseAttentionLayer: public BaseLayer {
 public:
     virtual void
     forward(TensorMap* output_tensors, TensorMap* input_tensors, const AttentionWeight<T>* attention_weights) = 0;
+
+    virtual bool UseFMHA() = 0;
 
     BaseAttentionLayer(cudaStream_t     stream,
                        cublasMMWrapper* cublas_wrapper,

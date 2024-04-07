@@ -1,4 +1,5 @@
 # 读取Huggingface模型
+
 huggingface模型支持从通过模型名从远程下载模型，代码如下：(如果无法访问huggingface需要配置环境变量`HF_ENDPOINT`)
 ``` python
 from maga_transformer.pipeline import Pipeline
@@ -7,7 +8,7 @@ from maga_transformer.model_factory import ModelFactory
 if __name__ == '__main__':
     model = ModelFactory.from_huggingface("Qwen/Qwen-1_8B-Chat")
     pipeline = Pipeline(model, model.tokenizer)
-    for res in pipeline(["<|im_start|>user\nhello, what's your name<|im_end|>\n<|im_start|>assistant\n"], max_new_tokens = 100):
+    for res in pipeline("<|im_start|>user\nhello, what's your name<|im_end|>\n<|im_start|>assistant\n", max_new_tokens = 100):
         print(res.batch_response)
     pipeline.stop()
 ```
@@ -22,7 +23,6 @@ model = ModelFactory.from_huggingface("/path/to/dir")
 from maga_transformer.utils.util import WEIGHT_TYPE
 
 model_config = ModelConfig(
-    async_mode=True,
     weight_type=WEIGHT_TYPE.INT8,
     max_seq_len=2000,
     ...
@@ -35,7 +35,6 @@ model_config = ModelConfig(
     model_type='chatglm',
     ckpt_path='/path/to/ckpt',
     tokenizer_path='/path/to/tokenizer',
-    async_mode=True,
     weight_type=WEIGHT_TYPE.INT8,
     max_seq_len=2000,
     ...

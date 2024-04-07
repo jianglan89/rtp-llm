@@ -18,7 +18,7 @@
 #include <cuda_fp16.h>
 
 #include "src/fastertransformer/kernels/penalty_types.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 namespace fastertransformer {
 
@@ -80,12 +80,12 @@ void invokeMinLengthPenalty(T*           logits,
                             cudaStream_t stream);
 
 template<typename T>
-void invokeCopyLogits(float* output_logits_buf,
-                      int* logit_index_buf,
-                      T* runtime_logits_buf,
-                      bool* skip_decode_buf_,
-                      const int local_batch_size,
-                      const int vocab_size_padded_,
+void invokeCopyLogits(float*       output_logits_buf,
+                      int*         logit_index_buf,
+                      T*           runtime_logits_buf,
+                      bool*        skip_decode_buf_,
+                      const int    local_batch_size,
+                      const int    vocab_size_padded_,
                       cudaStream_t steam);
 
 }  // namespace fastertransformer

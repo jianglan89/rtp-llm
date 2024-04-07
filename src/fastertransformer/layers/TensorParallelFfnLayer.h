@@ -17,8 +17,9 @@
 #pragma once
 
 #include "src/fastertransformer/layers/FfnLayer.h"
-#include "src/fastertransformer/utils/custom_ar_comm.h"
-#include "src/fastertransformer/utils/nccl_utils.h"
+#include "src/fastertransformer/cuda/custom_ar_comm.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
+#include "src/fastertransformer/utils/layernorm_types.h"
 
 namespace fastertransformer {
 
@@ -33,9 +34,9 @@ private:
 public:
     TensorParallelFfnLayer(size_t                              max_batch_size,
                            size_t                              max_seq_len,
-                           size_t                              head_num,
-                           size_t                              size_per_head,
+                           size_t                              hidden_units,
                            size_t                              expert_num,
+                           size_t                              moe_k,
                            size_t                              inter_size,
                            size_t                              inter_padding_size,
                            std::vector<int64_t>                layer_inter_size,
@@ -43,23 +44,29 @@ public:
                            NcclParam                           tensor_para,
                            cudaStream_t                        stream,
                            cublasMMWrapper*                    cublas_wrapper,
+                           tc::QuantAlgo                       quant_algo,
                            IAllocator*                         allocator,
                            bool                                do_all_reduce,
                            bool                                is_free_buffer_after_forward,
                            bool                                is_sparse,
                            bool                                is_sparse_head,
-                           int                                 int8_mode,
                            ActivationType                      activation_type,
+                           bool                                has_moe_norm,
                            float                               layernorm_eps,
                            std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
                            int                                 enable_custom_all_reduce);
-
-    TensorParallelFfnLayer(TensorParallelFfnLayer<T> const& ffn_layer);
 
     void forward(std::vector<fastertransformer::Tensor>*       output_tensors,
                  const std::vector<fastertransformer::Tensor>* input_tensors,
                  const FfnWeight<T>*                           ffn_weights) override;
     void forward(TensorMap* output_tensors, TensorMap* input_tensors, const FfnWeight<T>* ffn_weights) override;
+    void forward(Tensor&             ffn_output,
+                 const Tensor&       ffn_input,
+                 const int           layer_id,
+                 const Tensor&       lora_ids,
+                 const Tensor&       lora_input_lengths,
+                 const int           ffn_batch_size_lora,
+                 const FfnWeight<T>* ffn_weights);
 };
 
 }  // namespace fastertransformer

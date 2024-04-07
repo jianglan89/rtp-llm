@@ -23,7 +23,6 @@ class ModelTestBase(TestCase):
                         tokenizer_path: str = "",
                         ckpt_path: str = "",
                         weight_type: torch.dtype = torch.float16,
-                        async_mode: bool = False,
                         test_loss: bool = False,
                         fake_name: str = ""):
         super().__init__(methodName)
@@ -31,8 +30,7 @@ class ModelTestBase(TestCase):
         self.model_type = model_type
         self.tokenizer_path = tokenizer_path
         self.ckpt_path = ckpt_path
-        self.weight_type = weight_type
-        self.async_mode = async_mode
+        self.weight_type = weight_type        
         self.test_loss = test_loss
         self.fake_name = fake_name
 
@@ -43,7 +41,6 @@ class ModelTestBase(TestCase):
         logging.info(f"tokenizer path: {self.tokenizer_path}")
         logging.info(f"check point path: {self.ckpt_path}")
         logging.info(f"weight_type: {weight_type}")
-        logging.info(f"async_mode: {async_mode}")
         logging.info(f"test_loss: {test_loss}")
 
     def flat(self, x: Union[List[bool], bool]) -> List[bool]:
@@ -159,30 +156,22 @@ class ModelTestBase(TestCase):
             "calculate_loss": True
         }
 
-        test_input = ["hello?", "what's your name"]
-        responses = [response for response in pipeline.pipeline(test_input, [[], []], generate_config=generate_config)]
-        batch_loss = torch.Tensor(responses[0].generate_output.loss)
-        # torch.save(batch_loss, expect_result_file)
-        expect_result = torch.load(expect_result_file)
-        self.assertTrue(all(self.flat(self.close(expect_result, batch_loss).tolist())))
-
-        test_input = ["hello?"]
-        responses = [response for response in pipeline.pipeline(test_input, [[], []], generate_config=generate_config)]
-        batch_loss = torch.Tensor(responses[0].generate_output.loss)
+        test_input = "hello?"
+        response = pipeline.pipeline(test_input, [[], []], generate_config=generate_config)
+        batch_loss = torch.Tensor(response.generate_output.loss)
         self.assertTrue(all(self.flat(self.close(expect_result[0], batch_loss).tolist())))
 
-        test_input = ["what's your name"]
-        responses = [response for response in pipeline.pipeline(test_input, [[], []], generate_config=generate_config)]
-        batch_loss = torch.Tensor(responses[0].generate_output.loss)
+        test_input = "what's your name"
+        response = pipeline.pipeline(test_input, [[], []], generate_config=generate_config)
+        batch_loss = torch.Tensor(response.generate_output.loss)
         self.assertTrue(all(self.flat(self.close(expect_result[1], batch_loss).tolist())))
 
     def _load_model(self):
-        model = ModelFactory.from_model_type(ModelConfig(
+        model = ModelFactory.from_model_config(ModelConfig(
             model_type=self.model_type,
             tokenizer_path=self.tokenizer_path,
             ckpt_path=self.ckpt_path,
             weight_type=self.weight_type,
-            async_mode=False,
             max_seq_len=8192))
         return model
 
@@ -218,10 +207,7 @@ class ModelTestBase(TestCase):
                 self._test_loss(pipeline, expected_path)
             else:
                 expected_path += "/expect.pt"
-                if self.async_mode:
-                    self._test_ft_async_score(pipeline, expected_path)
-                else:
-                    self._test_ft_score(pipeline, expected_path)
+                self._test_ft_async_score(pipeline, expected_path)
         finally:
             if isinstance(model, AsyncModel):
                 model.stop()

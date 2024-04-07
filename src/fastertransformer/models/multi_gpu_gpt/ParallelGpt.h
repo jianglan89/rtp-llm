@@ -6,15 +6,15 @@
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/layers/BaseLayer.h"
 #include "src/fastertransformer/layers/TensorParallelFfnLayer.h"
-#include "src/fastertransformer/layers/attention_layers/TensorParallelDecoderSelfAttentionLayer.h"
-#include "src/fastertransformer/layers/attention_layers/TensorParallelGptContextAttentionLayer.h"
+#include "src/fastertransformer/models/multi_gpu_gpt/ParallelAttentionWrapper.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/NormWrapper.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLayerWeight.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
-#include "src/fastertransformer/utils/Tensor.h"
-#include "src/fastertransformer/utils/allocator.h"
-#include "src/fastertransformer/utils/cublasMMWrapper.h"
-#include "src/fastertransformer/utils/custom_ar_comm.h"
+#include "src/fastertransformer/core/Tensor.h"
+#include "src/fastertransformer/core/allocator.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
+#include "src/fastertransformer/cuda/custom_ar_comm.h"
+#include "src/fastertransformer/utils/activation_types.h"
 
 namespace fastertransformer {
 
@@ -39,6 +39,7 @@ private:
 
     FfnLayer<T>*                    ffn_layer_;
     std::unique_ptr<NormWrapper<T>> norm_wrapper_;
+    tc::QuantAlgo  quant_algo_;
 
     void allocateBuffer() override;
     void allocateBuffer(size_t total_batch_size, size_t max_seq_len, bool reuse_buf, bool pre_attn_ln);
@@ -63,6 +64,12 @@ private:
     int64_t* block_pointers_         = nullptr;
     int64_t* block_scale_pointers_   = nullptr;
 
+    // moe
+    T*   expert_scales_                            = nullptr;
+    int* expanded_source_row_to_expanded_dest_row_ = nullptr;
+    int* expert_for_source_row_                    = nullptr;
+    T*   fc2_result_                               = nullptr;
+
     std::vector<int64_t> block_pointers_vector_;
     std::vector<int64_t> block_scale_pointers_vector_;
 protected:
@@ -79,10 +86,9 @@ public:
                 std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm   = nullptr,
                 int                                 enable_custom_all_reduce = 0);
 
-    ParallelGpt(ParallelGpt<T> const& decoder);
-
     ~ParallelGpt();
     void preAllocate();
+    bool UseFMHA();
 
     void convert_to_block_pointers(TensorMap*                                            output_tensors,
                                    const TensorMap*                                      input_tensors,

@@ -16,7 +16,7 @@
 
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_preprocessors.h"
 #include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
+
 
 #if defined(TORCH_VERSION_MAJOR)                                                                                       \
     && ((TORCH_VERSION_MAJOR > 1) || ((TORCH_VERSION_MAJOR == 1) && (TORCH_VERSION_MINOR >= 9)))
@@ -24,7 +24,7 @@
 #endif
 
 namespace torch_ext {
-namespace ft = fastertransformer;
+namespace ft = tensorrt_llm::kernels::cutlass_kernels;
 using torch::Tensor;
 
 void check_quant_type_allowed(torch::ScalarType quant_type)

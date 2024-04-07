@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizer
+    from transformers import PreTrainedTokenizerBase
 
 import logging
 logger = logging.getLogger()
@@ -30,7 +30,7 @@ class Template:
 
     def encode_oneturn(
         self,
-        tokenizer: "PreTrainedTokenizer",
+        tokenizer: "PreTrainedTokenizerBase",
         query: str,
         resp: str,
         history: Optional[List[Tuple[str, str]]] = None,
@@ -50,7 +50,7 @@ class Template:
 
     def encode_multiturn(
         self,
-        tokenizer: "PreTrainedTokenizer",
+        tokenizer: "PreTrainedTokenizerBase",
         query: str,
         resp: str,
         history: Optional[List[Tuple[str, str]]] = None,
@@ -80,7 +80,7 @@ class Template:
 
     def _get_special_ids(
         self,
-        tokenizer: "PreTrainedTokenizer"
+        tokenizer: "PreTrainedTokenizerBase"
     ) -> Tuple[List[int], List[int]]:
         if tokenizer.bos_token_id is not None and getattr(tokenizer, "add_bos_token", True):
             bos_ids = [tokenizer.bos_token_id]
@@ -99,7 +99,7 @@ class Template:
 
     def _encode(
         self,
-        tokenizer: "PreTrainedTokenizer",
+        tokenizer: "PreTrainedTokenizerBase",
         system: str,
         history: List[Tuple[str, str]]
     ) -> List[Tuple[List[int], List[int]]]:
@@ -128,7 +128,7 @@ class Template:
 
     def _convert_inputs_to_ids(
         self,
-        tokenizer: "PreTrainedTokenizer",
+        tokenizer: "PreTrainedTokenizerBase",
         context: List[Union[str, Dict[str, str]]],
         system: Optional[str] = None,
         query: Optional[str] = None,
@@ -163,7 +163,7 @@ class Llama2Template(Template):
 
     def _encode(
         self,
-        tokenizer: "PreTrainedTokenizer",
+        tokenizer: "PreTrainedTokenizerBase",
         system: str,
         history: List[Tuple[str, str]]
     ) -> List[Tuple[List[int], List[int]]]:
@@ -212,7 +212,7 @@ def register_template(
 
 def get_template_and_fix_tokenizer(
     name: str,
-    tokenizer: "PreTrainedTokenizer"
+    tokenizer: "PreTrainedTokenizerBase"
 ) -> Template:
     if tokenizer.eos_token_id is None:
         tokenizer.eos_token = "<|endoftext|>"
@@ -513,7 +513,7 @@ register_template(
 
 
 register_template(
-    name="intern",
+    name="internlm",
     prefix=[
         "{{system}}"
     ],
@@ -809,4 +809,43 @@ register_template(
     sep=[
         "\n"
     ]
+)
+
+register_template(
+    name="internlm2",
+    prefix=[
+        "<s>[UNUSED_TOKEN_146]system\n{{system}}[UNUSED_TOKEN_145]\n"
+    ],
+    prompt=[
+        "[UNUSED_TOKEN_146]user\n{{query}}[UNUSED_TOKEN_145]\n[UNUSED_TOKEN_146]assistant\n",
+    ],
+    system="You are an AI assistant whose name is InternLM (书生·浦语).\n"
+    "- InternLM (书生·浦语) is a conversational language model that is developed by Shanghai AI Laboratory (上海人工智能实验室). It is designed to be helpful, honest, and harmless.\n"
+    "- InternLM (书生·浦语) can understand and communicate fluently in the language chosen by the user such as English and 中文.",
+    sep=[
+        {"token": "[UNUSED_TOKEN_145]"},
+        "\n"
+    ],
+    stop_words=[
+        "[UNUSED_TOKEN_145]",
+        "</s>",
+    ],
+    efficient_eos=True
+)
+
+register_template(
+    name="mixtral",
+    prefix=[
+        "<s>",
+    ],
+    prompt=[
+        "[INST]{{query}}[/INST]"
+    ],
+    stop_words=[
+        "</s>",
+    ],
+    sep=[
+        "</s>",
+    ],
+    system="",
 )

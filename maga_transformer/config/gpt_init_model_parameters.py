@@ -5,6 +5,7 @@ import torch
 import logging
 # make sure so init
 from dataclasses import dataclass, field, fields
+from enum import Enum
 from maga_transformer.utils.util import WEIGHT_TYPE
 
 updated_params: Set[str] = set()
@@ -70,13 +71,21 @@ class SparseConfig(DataClassBase):
             return False
         return True
 
-class ViTConfig:
-    vit_special_token_ids: Dict[str, int] = {}
-    vit_special_tokens: Dict[str, str] = {}
+class VitParameters:
+    # config includes origin vit config in ckpt/config.json
+    config: Dict[str, Any] = {}
+    vit_special_token_ids: Dict[str, Any] = {}
+    vit_special_tokens: Dict[str, Any] = {}
+    image_expand_token: Optional[int] = None
+    vit_weights = None
+
+class ModelType(Enum):
+    NORMAL = "normal"
+    EMBEDDING = "embedding"
 
 class GptInitModelParameters:
     __slots__ = {
-        'gpt_init_params',
+        "gpt_init_params",
         "_model_related_types",
         "has_lm_head_bias",
         "reserve_runtime_mem_mb",
@@ -87,7 +96,11 @@ class GptInitModelParameters:
         "vit_related_params",
         "lora_infos",
         "multi_task_prompt",
-        "medusa_config"
+        "medusa_config",
+        "normalize_lm_head_weight",
+        "ref_model",
+        "is_quant_mode",
+        "model_type"
     }
 
     def __init__(self,
@@ -97,9 +110,9 @@ class GptInitModelParameters:
                  max_seq_len: int,
                  vocab_size: int,
                  **kwargs):
-
+        hidden_size = head_num * size_per_head
         self.gpt_init_params = torch.classes.FasterTransformer.GptInitParameter(
-            head_num, size_per_head, layer_num, max_seq_len, vocab_size
+            head_num, size_per_head, layer_num, max_seq_len, vocab_size, hidden_size
         )
         self._model_related_types: Dict[str, str] = {
             "layernorm_type": "setLayerNormType",
@@ -107,11 +120,21 @@ class GptInitModelParameters:
             "activation_type": "setActivationType"
         }
         self.has_lm_head_bias = False
+        self.normalize_lm_head_weight = False
         self.kv_cache_mem_mb = -1
         self.src_quantization_bit = 0
         self.tp_split_emb_and_lm_head = True
         self.medusa_config = None
-        self.vit_related_params = ViTConfig()
+
+        self.is_quant_mode = False
+        self.ptuning_path = None
+        self.pre_seq_len = 0
+        self.prefix_projection = False
+        self.vit_related_params: VitParameters = VitParameters()
+        self.ref_model: Optional[torch.nn.Module] = None
+
+        self.model_type = ModelType.NORMAL
+
         for k, v in kwargs.items():
             setattr(self, k, v)
 
@@ -173,16 +196,19 @@ class GptInitModelParameters:
             self.medusa_config = medusa_config
             self.gpt_init_params.use_medusa = True
 
-    def update_prefix_prompt(self, ptuning_path: str):
-        config_file_path = os.path.join(ptuning_path, "config.json")
-        if not os.path.exists(config_file_path):
-            return
-        with open(config_file_path, 'r') as reader:
-            content = json.load(reader)
-            if 'pre_seq_len' in content:
-                self.pre_seq_len = content['pre_seq_len']
-            if 'prefix_projection' in content:
-                self.prefix_projection = content['prefix_projection']
+    def update_embedding_config(self, ckpt_path: str):
+        def _check_is_sentence_transformer_repo() -> bool:
+            if os.path.exists(os.path.join(ckpt_path, "config_sentence_transformers.json")):
+                return True
+            module_file_path = os.path.join(ckpt_path, "modules.json")
+            if os.path.exists(module_file_path):
+                with open(module_file_path, 'r') as reader:
+                    content = reader.read()
+                    if 'sentence_transformers' in content:
+                        return True
+            return False
+        if os.environ.get('EMBEDDING_MODEL', '0') == '1' or _check_is_sentence_transformer_repo():
+            self.model_type = ModelType.EMBEDDING
 
     def update_inter_padding_size(self, tp_size: int):
         align_size = tp_size * 64
@@ -190,10 +216,10 @@ class GptInitModelParameters:
             layer_inter_padding_size = []
             for idx in range(len(self.layer_inter_size)):
                 inter_size = self.layer_inter_size[idx]
-                layer_inter_padding_size.append(inter_size + (get_pad_size(inter_size, align_size) if self.int8_mode else 0))
+                layer_inter_padding_size.append(inter_size + (get_pad_size(inter_size, align_size) if self.is_quant_mode else 0))
             self.layer_inter_padding_size = layer_inter_padding_size
         self.inter_padding_size = \
-            self.inter_size + (get_pad_size(self.inter_size, align_size) if self.int8_mode else 0)
+            self.inter_size + (get_pad_size(self.inter_size, align_size) if self.is_quant_mode else 0)
         if self.head_num_kv <= 0:
             self.head_num_kv = self.head_num
         if self.inter_padding_size <= 0:
@@ -203,27 +229,62 @@ class GptInitModelParameters:
         prompt_file_path =  os.environ.get('MULTI_TASK_PROMPT', None)
         if not prompt_file_path:
             self.multi_task_prompt = None
+        else:
+            with open(prompt_file_path, 'r') as reader:
+                multi_task_prompt = json.loads(reader.read(), strict=False)
+                self.multi_task_prompt = multi_task_prompt
+                return
+
+        prompt_str =  os.environ.get('MULTI_TASK_PROMPT_STR', None)
+        if not prompt_str:
+            self.multi_task_prompt = None
+        else:
+            self.multi_task_prompt = json.loads(prompt_str, strict=False)
             return
-        with open(prompt_file_path, 'r') as reader:
-            multi_task_prompt = json.loads(reader.read())
-            self.multi_task_prompt = multi_task_prompt
+
+    def update_ptuning_config(self):
+        if not self.ptuning_path:
+            inner_ptuing_path = os.path.join(self.ckpt_path, 'ptuning')
+            if os.path.exists(inner_ptuing_path):
+                logging.info(f"ckpt contain ptuning ckpt files, {inner_ptuing_path}")
+                self.ptuning_path = inner_ptuing_path
+        logging.info(f"use ptuning from model_config set by env, {self.ptuning_path}")
+        if self.ptuning_path:
+            config_file_path = os.path.join(self.ptuning_path, "config.json")
+        else:
+            config_file_path = os.path.join(self.ckpt_path, "config.json")
+        if not os.path.exists(config_file_path):
+            return
+        logging.info(f"load ptuing config from {config_file_path}")
+        with open(config_file_path, 'r') as reader:
+            content = json.load(reader)
+            if 'pre_seq_len' in content:
+                self.pre_seq_len = content['pre_seq_len']
+            if 'prefix_projection' in content:
+                self.prefix_projection = content['prefix_projection']
+        logging.info(f"read ptuning config, pre_seq_len:{self.pre_seq_len}, prefix_projection:{self.prefix_projection}")
 
     def update_common(self,
                       ckpt_path: str,
                       lora_infos: Optional[Dict[str, str]],
+                      ptuning_path: Optional[str],
                       tokenizer_path: str,
-                      int8_mode: int,
+                      int8_mode: bool,
                       data_type: WEIGHT_TYPE,
                       max_seq_len: int,
                       seq_size_per_block: int,
                       tp_size: int,
-                      gen_num_per_circle: int):
+                      gen_num_per_circle: int,
+                      ref_model: Optional[torch.nn.Module]):
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path
-        self.int8_mode = int8_mode
+        self.quant_algo.int8_mode = int8_mode
+        self.is_quant_mode = int8_mode or self.quant_algo.int4_mode
         self.data_type = data_type.to_str()
         self.gen_num_per_circle = gen_num_per_circle
+        self.ptuning_path = ptuning_path
+        self.ref_model = ref_model
         if max_seq_len != 0:
             self.max_seq_len = max_seq_len
         if self.max_seq_len < 1:
@@ -233,7 +294,9 @@ class GptInitModelParameters:
         self.update_config_with_sparse_config(ckpt_path)
         self.update_inter_padding_size(tp_size)
         self.update_task_prompt_config()
+        self.update_ptuning_config()
         self.update_medusa_config(ckpt_path)
+        self.update_embedding_config(ckpt_path)
 
         self.seq_size_per_block = seq_size_per_block
         logging.info(f'seq_size_per_block: {self.seq_size_per_block}')
@@ -257,8 +320,13 @@ class GptInitModelParameters:
         # Update stop_words_str and stop_word_ids from ENV
         if os.environ.get('STOP_WORDS_STR', None) is not None:
             self.special_tokens.stop_words_str = self.special_tokens.stop_words_str + json.loads(os.environ['STOP_WORDS_STR'])
+        elif os.environ.get('FORCE_STOP_WORDS_STR', None):
+            self.special_tokens.stop_words_str = json.loads(os.environ['FORCE_STOP_WORDS_STR'])
+
         if os.environ.get('STOP_WORDS_LIST', None) is not None:
             self.special_tokens.stop_words_list = self.special_tokens.stop_words_list + json.loads(os.environ['STOP_WORDS_LIST'])
+        elif os.environ.get('FORCE_STOP_WORDS_LIST', None):
+            self.special_tokens.stop_words_list = json.loads(os.environ['FORCE_STOP_WORDS_LIST'])
 
     def get_params_dict(self):
         res: Dict[str, Any] = {}
@@ -267,7 +335,7 @@ class GptInitModelParameters:
         return res
 
     def eval_model_size(self):
-        hidden_size = self.size_per_head * self.head_num
+        hidden_size = self.gpt_init_params.hidden_size
 
         layer_weight_param_count = 0
         # qkv
@@ -288,20 +356,27 @@ class GptInitModelParameters:
             layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * hidden_size
 
         # ffn w1, w2, w3
+        ffn_export_num = self.expert_num if self.expert_num > 0 else 1
         ffn_w_count = 2 if self.activation_type == 'gelu' else 3
         if self.layer_inter_size and isinstance(self.layer_inter_size, list):
             for layer_inter_size in self.layer_inter_size:
-                layer_weight_param_count = layer_weight_param_count + layer_inter_size * hidden_size * ffn_w_count
+                layer_weight_param_count = layer_weight_param_count + layer_inter_size * hidden_size * ffn_w_count * ffn_export_num
 
         else:
-            layer_weight_param_count = layer_weight_param_count + self.layer_num * self.inter_size * hidden_size * ffn_w_count
+            layer_weight_param_count = layer_weight_param_count + self.layer_num * self.inter_size * hidden_size * ffn_w_count * ffn_export_num
+
+        if ffn_export_num > 1:
+            layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * ffn_export_num
 
         # other small tensor
         layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * 11
 
-
         word_emb_param_count =  self.vocab_size * hidden_size
-        layer_param_bytes = 2 - self.int8_mode
+        layer_param_bytes = 2
+        if self.quant_algo.int8_mode:
+            layer_param_bytes = 1
+        elif self.quant_algo.int4_mode:
+            layer_param_bytes = 0.54
 
         model_size = word_emb_param_count * 2 + \
             layer_weight_param_count * layer_param_bytes + \

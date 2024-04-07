@@ -5,11 +5,10 @@ import logging
 import os
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 from enum import Enum, auto
+from transformers import PreTrainedTokenizerBase
 
-from transformers import PreTrainedTokenizer
 from dataclasses import dataclass
 
-from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
     ChatCompletionRequest, RoleEnum, FunctionCall
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
@@ -18,6 +17,7 @@ from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, Prom
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
     ContentPart, ContentPartTypeEnum
+from maga_transformer.openai.renderer_factory_register import register_renderer
 
 class SeparatorStyle(Enum):
     SINGLE = auto()
@@ -60,14 +60,14 @@ class Conversation:
 
 conv_llava_v0 = Conversation(
     system_content="A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions.",
-    roles={RoleEnum.user: "Human", RoleEnum.assistant: "Assistant"},
+    roles={RoleEnum.user: "Human", RoleEnum.assistant: "Assistant", RoleEnum.system: "System"},
     sep_style=SeparatorStyle.SINGLE,
     seps=["###"]
 )
 
 conv_llava_v1 = Conversation(
     system_content="A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions.",
-    roles={RoleEnum.user: "USER", RoleEnum.assistant: "ASSISTANT"},
+    roles={RoleEnum.user: "USER", RoleEnum.assistant: "ASSISTANT", RoleEnum.system: "SYSTEM"},
     sep_style=SeparatorStyle.TWO,
     seps=[" ", "</s>"]
 )
@@ -78,7 +78,7 @@ conv_templates = {
 }
 
 class LlavaRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: PreTrainedTokenizer, renderer_params: RendererParams):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
 
     def _get_conv_template(self, model_name: str) -> Conversation:
@@ -102,3 +102,5 @@ class LlavaRenderer(CustomChatRenderer):
         prompt_and_images = self._render_messages(messages)
         input_ids = self.tokenizer.encode(prompt_and_images.prompt)
         return RenderedInputs(input_ids=input_ids, input_images=prompt_and_images.image_urls)
+
+register_renderer('llava', LlavaRenderer)

@@ -18,27 +18,36 @@
 #include <cuda_runtime_api.h>
 
 #include "cutlass/device_kernel.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
-namespace fastertransformer {
+namespace tensorrt_llm
+{
+namespace cutlass_extensions
+{
 
-template<typename GemmKernel>
+template <typename GemmKernel>
 inline int compute_occupancy_for_kernel()
 {
 
     int smem_size = int(sizeof(typename GemmKernel::SharedStorage));
 
-    if (smem_size > (48 << 10)) {
-        cudaError_t status =
-            cudaFuncSetAttribute(cutlass::Kernel<GemmKernel>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-        if (status == cudaError::cudaErrorInvalidValue) {
-            // Clear the error bit since we can ignore this.
-            // This should mean that smem_size > cudaDevAttrMaxSharedMemoryPerBlockOptin. In that case, we return an
-            // occupancy of 0. This will cause the heuristic to ignore this configuration.
-            status = cudaGetLastError();
+    if (smem_size > (48 << 10))
+    {
+        cudaFuncAttributes attr;
+        int device = 0;
+        int max_smem_per_block = 0;
+        check_cuda_error(cudaGetDevice(&device));
+        check_cuda_error(
+            cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+        check_cuda_error(cudaFuncGetAttributes(&attr, cutlass::Kernel<GemmKernel>));
+        if (smem_size + attr.sharedSizeBytes >= static_cast<size_t>(max_smem_per_block))
+        {
+            // This should mean that
+            // cudaFuncSetAttribute(cutlass::Kernel<GemmKernel>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size)
+            // wouldn't work. In that case, we return an occupancy of 0. This will cause the heuristic to ignore this
+            // configuration.
             return 0;
         }
-        check_cuda_error(status);
     }
 
     int max_active_blocks = -1;
@@ -48,4 +57,5 @@ inline int compute_occupancy_for_kernel()
     return max_active_blocks;
 }
 
-}  // namespace fastertransformer
+} // namespace cutlass_extensions
+} // namespace tensorrt_llm

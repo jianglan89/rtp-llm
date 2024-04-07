@@ -10,13 +10,13 @@ from maga_transformer.models.gpt import GPT
 from maga_transformer.model_factory_register import register_model
 
 class BloomWeightInfo(ModelDeployWeightInfo):
-    def _process_meta(self, meta_dict: Any):
-        if 'lm_head.weight' in meta_dict:
+    def _process_meta(self, meta_dicts, weight_keys):
+        if 'lm_head.weight' in weight_keys:
             self._lm_head = True
         else:
             self._lm_head = False
 
-        if 'transformer.h.0.input_layernorm.weight' in meta_dict:
+        if 'transformer.h.0.input_layernorm.weight' in weight_keys:
             self._transformer_prefix = True
         else:
             self._transformer_prefix = False
@@ -109,8 +109,8 @@ class Bloom(GPT):
         config.special_tokens.eos_token_id = config_json['eos_token_id']
         return config
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict:
             config = Bloom.from_huggingface(config_dict)
@@ -132,4 +132,4 @@ class Bloom(GPT):
         config.use_attention_linear_bias=True
         return config
     
-register_model('bloom', Bloom)
+register_model('bloom', Bloom, ["BloomForCausalLM"])

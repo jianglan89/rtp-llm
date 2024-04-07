@@ -15,21 +15,16 @@
  */
 
 #include "src/fastertransformer/utils/logger.h"
-#include <cuda_runtime.h>
 
 namespace fastertransformer {
 
-Logger::Logger()
-{
+Logger::Logger() {
     char* is_first_rank_only_char = std::getenv("FT_LOG_FIRST_RANK_ONLY");
     bool  is_first_rank_only =
         (is_first_rank_only_char != nullptr && std::string(is_first_rank_only_char) == "ON") ? true : false;
 
     char* env_str = std::getenv("WORLD_RANK");
-    rank = env_str ? std::atoi(env_str) : 0;
-
-    int device_id;
-    cudaGetDevice(&device_id);
+    rank          = env_str ? std::atoi(env_str) : 0;
 
     char* level_name = std::getenv("FT_LOG_LEVEL");
     if (level_name != nullptr) {
@@ -42,13 +37,12 @@ Logger::Logger()
         };
         auto level = name_to_level.find(level_name);
         // If FT_LOG_FIRST_RANK_ONLY=ON, set LOG LEVEL of other device to ERROR
-        if (is_first_rank_only && device_id != 0) {
+        if (is_first_rank_only && rank != 0) {
             level = name_to_level.find("ERROR");
         }
         if (level != name_to_level.end()) {
             setLevel(level->second);
-        }
-        else {
+        } else {
             fprintf(stderr,
                     "[FT][WARNING] Invalid logger level FT_LOG_LEVEL=%s. "
                     "Ignore the environment variable and use a default "
@@ -57,6 +51,11 @@ Logger::Logger()
             level_name = nullptr;
         }
     }
+}
+
+void Logger::log(std::exception const& ex, Logger::Level level)
+{
+    log(level, "%s: %s", FTException::demangle(typeid(ex).name()).c_str(), ex.what());
 }
 
 }  // namespace fastertransformer

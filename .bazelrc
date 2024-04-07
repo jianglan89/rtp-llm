@@ -1,6 +1,6 @@
-common --spawn_strategy=local # avoid nvcc conflicts
-common --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
+build --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
 
+build --spawn_strategy=local # avoid nvcc conflicts
 build --action_env PYTHON_BIN_PATH="/opt/conda310/bin/python3"
 build --cxxopt="-std=c++17" --copt="-DGTEST_USE_OWN_TR1_TUPLE=0" --copt="-DEIGEN_MAX_CPP_VER=11" --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 build -c opt
@@ -17,7 +17,6 @@ build --copt="-DGOOGLE_CUDA=1"
 build --copt="-DBUILD_MULTI_GPU_TCP=ON"
 build --copt="-DBUILD_MULTI_GPU=ON"
 build --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
-build --copt="-DUSE_WEIGHT_ONLY=1"
 
 build --copt="-DUSE_NVTX=ON"
 build --copt="-DENABLE_BF16=1"
@@ -60,6 +59,8 @@ build:cuda12_2 --action_env TF_CUDA_VERSION="12.2"
 build:cuda12_2 --host_action_env TF_CUDA_VERSION="12.2"
 build:cuda12_2 --define=use_cuda12=true
 build:cuda12_2 --copt="-DUSE_CUDA12=1"
+
+build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false
 
 build:debug -c dbg
 build:debug --copt -g --copt -O0

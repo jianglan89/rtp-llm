@@ -9,6 +9,7 @@ class AccMetrics(Enum):
     CONFLICT_QPS_METRIC = "py_rtp_framework_concurrency_exception_qps"    
     ITER_QPS_METRIC = "py_rtp_response_iterate_qps"    
     UPDATE_QPS_METRIC = "py_rtp_update_qps_metric"
+    FALLBACK_QPS_METRIC = "py_rtp_fallback_qps_metric"
     ERROR_UPDATE_QPS_METRIC = "py_rtp_error_update_target_qps"
 
 class GaugeMetrics(Enum):
@@ -31,8 +32,9 @@ class GaugeMetrics(Enum):
     ASYNC_WAIT_QUERY_SIZE_METRIC = "ft_async_wait_query_size"
     ASYNC_WAIT_WAIT_TIME_METRIC = "ft_async_wait_time"
     ASYNC_ITERATE_LANTENCY = "ft_async_iterate_rt"
-    KV_CACHE_MEM_USED_RATIO_METRIC = "kv_cache_mem_used_ratio"
-    KVCACHE_REUSE_LENGTH_METRIC = "ft_kvcache_reuse_length"
+    KV_CACHE_MEM_USED_RATIO_METRIC = "ft_kv_cache_mem_used_ratio"
+    KV_CACHE_REUSE_LENGTH_METRIC = "ft_kvcache_reuse_length"
+    KV_CACHE_ITEM_NUM_METRIC = "ft_kvcache_item_num"
     UPDATE_LANTENCY_METRIC = "py_rtp_update_framework_rt"
 
 class MetricReporter(object):

@@ -2,17 +2,18 @@ import os
 import logging
 import json
 import torch
+from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.model_factory import ModelConfig, ModelFactory
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 
 class FakeModelLoader(object):
-    def __init__(self, model_type: str, tokenizer_path: str, ckpt_path: str, weight_type: torch.dtype, async_mode: bool, max_seq_len: int=0) -> None:
+    def __init__(self, model_type: str, tokenizer_path: str, ckpt_path: str, weight_type: WEIGHT_TYPE, max_seq_len: int=0) -> None:
         self.model_type = model_type
         self.tokenizer_path = tokenizer_path
         self.ckpt_path = ckpt_path
         self.weight_type = weight_type
-        self.async_mode = async_mode
         self.max_seq_len = max_seq_len
 
         logging.info(f"tokenizer path: {self.tokenizer_path}")
@@ -31,14 +32,13 @@ class FakeModelLoader(object):
         model_config = ModelConfig(ckpt_path=self.ckpt_path,
             model_type=self.model_type,
             tokenizer_path=self.tokenizer_path,
-            async_mode=self.async_mode,
             weight_type=self.weight_type,
             max_seq_len=64,
             seq_size_per_block=8,
             gen_num_per_circle=1
             )
 
-        raw_config = model_cls.create_config(model_config)
+        raw_config: GptInitModelParameters = model_cls.create_config(model_config)
         raw_config.head_num = config_json.get("num_attention_heads", raw_config.head_num)
         raw_config.head_num_kv = config_json.get("num_attention_heads", raw_config.head_num_kv)
         if config_json.get('multi_query_attention', False):
@@ -59,11 +59,12 @@ class FakeModelLoader(object):
             max_seq_len=self.max_seq_len,
             seq_size_per_block=8,
             tp_size=1,
-            gen_num_per_circle=1
+            gen_num_per_circle=1,
+            ptuning_path=None,
+            ref_model=None
         )
 
         model = model_cls.from_config(raw_config)
-        if self.async_mode:
-            model = AsyncModel(model)
+        model = AsyncModel(model)
 
         return model

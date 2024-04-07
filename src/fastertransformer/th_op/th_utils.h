@@ -15,8 +15,10 @@
  */
 
 #pragma once
-#include "src/fastertransformer/utils/Tensor.h"
-#include "src/fastertransformer/utils/allocator_impl.h"
+#include "src/fastertransformer/core/Tensor.h"
+#include "src/fastertransformer/core/allocator.h"
+#include "src/fastertransformer/cuda/allocator_torch.h"
+
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>
@@ -55,8 +57,7 @@
 namespace torch_ext {
 
 template<typename T>
-inline T* get_ptr(const torch::Tensor& t)
-{
+inline T* get_ptr(const torch::Tensor& t) {
     return reinterpret_cast<T*>(t.data_ptr());
 }
 

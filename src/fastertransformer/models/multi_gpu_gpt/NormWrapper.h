@@ -1,8 +1,8 @@
 #pragma once
 
-#include "src/fastertransformer/utils/debug_utils.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/add_residual_kernels.h"
+#include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
 
 namespace fastertransformer
 {
@@ -40,7 +40,6 @@ public:
                                            T*           norm_output,
                                            const T*     input,
                                            const T*     residual1,
-                                           const T*     residual2,
                                            const T*     gamma,
                                            const T*     beta,
                                            const T*     bias,

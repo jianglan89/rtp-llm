@@ -24,7 +24,7 @@
 #include "src/fastertransformer/kernels/sampling_topp_kernels.h"
 #include "src/fastertransformer/layers/sampling_layers/TopPSamplingLayer.h"
 #include "src/fastertransformer/utils/logger.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 
 namespace fastertransformer {
 
@@ -284,8 +284,8 @@ void TopPSamplingLayer<T>::runSampling(TensorMap* output_tensors, TensorMap* inp
     FT_CHECK(input_tensors->size() >= 4);
     FT_CHECK(output_tensors->size() >= 1);
 
-    const int batch_size       = output_tensors->at("output_ids").shape[1];
-    const int local_batch_size = input_tensors->at("logits").shape[0];
+    const int batch_size       = output_tensors->at("output_ids").shape()[1];
+    const int local_batch_size = input_tensors->at("logits").shape()[0];
     const int step             = input_tensors->at("step").getVal<int>();
     const int ite              = input_tensors->at("ite").getVal<int>();
 

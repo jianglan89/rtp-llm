@@ -22,9 +22,13 @@
 #include "src/fastertransformer/layers/BaseLayer.h"
 #include "src/fastertransformer/layers/FfnWeight.h"
 #include "src/fastertransformer/layers/GemmRunner.h"
+#include "src/fastertransformer/layers/LoraGemm.h"
 #include "src/fastertransformer/utils/activation_types.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
+#include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
+#include "src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
+#include "src/fastertransformer/utils/layernorm_types.h"
 #include <stdint.h>
 #include <vector>
 
@@ -37,46 +41,47 @@ private:
     size_t max_token_num_ = 0;
 
     // meta data
-    size_t head_num_ = 0;       // (martinma): this member is not used in this class. Remove it?
-    size_t size_per_head_ = 0;  // (martinma): this member is not used in this class. Remove it?
-    size_t expert_num_ = 0;
+    size_t expert_num_    = 0;
+    size_t moe_k_         = 0;
 
     // calculated data
     size_t hidden_units_ = 0;
 
+    std::shared_ptr<LoraGemm<T>>   lora_gemm_;
     std::shared_ptr<GemmRunner<T>> gemm_runner_;
-    std::shared_ptr<CutlassFpAIntBGemmRunner<T, uint8_t>> weight_only_int8_fc_runner_;
+
+    std::shared_ptr<tensorrt_llm::plugins::MixtureOfExpertsPlugin> moe_plugin_;
 
     void allocateBuffer() override;
     void freeBuffer() override;
     void allocateBuffer(size_t token_num, int moe_k = 0, bool use_moe = false);
 
 protected:
-    T*    inter_buf_        = nullptr;
-    T*    inter_buf_2_      = nullptr;  // for gated activation
-    T*    inter_buf_normed_ = nullptr;
+    T*     inter_buf_        = nullptr;
+    T*     inter_buf_2_      = nullptr;  // for gated activation
+    T*     inter_buf_normed_ = nullptr;
+    float* moe_gates_buf_    = nullptr;
+    char*  moe_fc_workspace_ = nullptr;
 
     char*  mixed_gemm_workspace_ = nullptr;
     size_t mixed_gemm_ws_bytes_  = 0;
 
-    size_t inter_size_ = 0;
+    size_t inter_size_         = 0;
     size_t inter_padding_size_ = 0;
 
-    const bool is_sparse_head_ = false;
+    const bool                 is_sparse_head_ = false;
     const std::vector<int64_t> local_layer_inter_size_;
     const std::vector<int64_t> local_layer_inter_padding_size_;
 
-    // int8_mode_ == 0 means we don't use any mechanism related to INT8.
-    // int8_mode_ == 1 for weight quantized only gemm for GPT
-    // int8_mode_ == 2 for SmoothQuant O3 (per tensor scales)
-    int int8_mode_ = 0;
+    tc::QuantAlgo quant_algo_;
 
     ActivationType activation_type_ = ActivationType::InvalidType;
+    bool has_moe_norm_ = false;
 
     bool use_gated_activation_ = false;
 
     float layernorm_eps_ = 0;
-    
+
     ActivationType getActivationType() const {
         return activation_type_;
     };
@@ -95,24 +100,23 @@ protected:
 public:
     FfnLayer(size_t               max_batch_size,
              size_t               max_seq_len,
-             size_t               head_num,       // (martinma): redundant parameter?
-             size_t               size_per_head,  // (martinma): redundant parameter?
+             size_t               hidden_units,
              size_t               expert_num,
+             size_t               moe_k,
              size_t               inter_size,
              size_t               inter_padding_size,
              std::vector<int64_t> local_layer_inter_size,
              std::vector<int64_t> local_layer_inter_padding_size,
              cudaStream_t         stream,
              cublasMMWrapper*     cublas_wrapper,
+             tc::QuantAlgo        quant_algo,
              IAllocator*          allocator,
              bool                 is_free_buffer_after_forward,
              bool                 sparse,
              bool                 is_sparse_head,
-             int                  int8_mode,
              ActivationType       activation_type,
+             bool                 has_moe_norm,
              float                layernorm_eps);
-
-    FfnLayer(FfnLayer<T> const& ffn_layer);
 
     virtual ~FfnLayer();
 

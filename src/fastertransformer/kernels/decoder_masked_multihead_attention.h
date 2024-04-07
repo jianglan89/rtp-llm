@@ -18,8 +18,8 @@
 
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
+
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
 #include <stdint.h>
@@ -43,8 +43,7 @@ namespace fastertransformer {
 
 /// Round up to next higher power of 2 (return x if it's already a power
 /// of 2).
-inline int pow2roundup(int x)
-{
+inline int pow2roundup(int x) {
     if (x < 0)
         return 0;
     --x;
@@ -96,9 +95,12 @@ struct Multihead_attention_params_base {
     int batch_size = 0;
     // The beam width
     int beam_width = 0;
-    // The sequence length.
-    // TODO: change name max_seq_len
-    int memory_max_len = 0;
+    // By default, max_kv_cache_length == cyclic_kv_cache_length
+    // unless each layer has different cyclic kv cache length.
+    // Max cache capacity (used to allocate KV cache)
+    int max_kv_cache_length = 0;
+    // Cyclic kv cache capacity (used to get the cyclic kv cache position for new tokens)
+    int cyclic_kv_cache_length = 0;
     // The number of heads (H).
     int num_heads = 0;
     // Controls MHA/MQA/GQA

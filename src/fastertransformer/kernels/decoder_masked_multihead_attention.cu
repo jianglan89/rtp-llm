@@ -16,7 +16,7 @@
 
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include <assert.h>
 #include <float.h>
 #include <type_traits>
@@ -43,8 +43,11 @@ void multihead_attention_(KERNEL_PARAMS_TYPE& params, const KVCacheBuffer& kv_ca
             mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 64>(params, kv_cache_buffer, stream);
             break;
         // case 80: mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 80>(params, kv_cache_buffer, stream);
-        // break; case 96: mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 96>(params, kv_cache_buffer,
-        // stream); break; case 112:
+        // break;
+        case 96:
+            mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 96>(params, kv_cache_buffer,stream);
+            break;
+        // case 112:
         //     mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 112>(params, kv_cache_buffer, stream);
         //     break;
         case 128:
@@ -62,11 +65,11 @@ void multihead_attention_(KERNEL_PARAMS_TYPE& params, const KVCacheBuffer& kv_ca
         // case 224:
         //     mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 224>(params, kv_cache_buffer, stream);
         //     break;
-        // case 256:
-        //     mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 256>(params, kv_cache_buffer, stream);
-        //     break;
+        case 256:
+            mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 256>(params, kv_cache_buffer, stream);
+            break;
         default:
-            throw("unsupported head_size");
+            throw std::invalid_argument("unsupported head_size: " + std::to_string(params.hidden_size_per_head));
     }
 }
 
@@ -199,7 +202,8 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
     params.cache_indir              = cache_indir;
     params.batch_size               = inference_batch_size;
     params.beam_width               = beam_width;
-    params.memory_max_len           = memory_max_len;
+    params.max_kv_cache_length      = memory_max_len;
+    params.cyclic_kv_cache_length   = memory_max_len + max_prefix_prompt_length;
     params.prefix_prompt_lengths    = prefix_prompt_lengths;
     params.max_prefix_prompt_length = max_prefix_prompt_length;
     params.count_prefix_length =

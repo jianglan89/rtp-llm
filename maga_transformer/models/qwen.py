@@ -11,10 +11,12 @@ from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
     ModelDeployWeightInfo, CkptWeightInfo, \
     concat_0, concat_1, identity, zeros, transpose, trans_qkv, trans_qkv_b, trans_lora_qkv
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.base_model import BaseTokenizer
 from maga_transformer.models.gpt import GPT
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer as QwenTokenizerOrigin
+from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer as QWen2Tokenizer
 from maga_transformer.model_factory_register import register_model
+from pathlib import Path
+import logging
 
 def transpose_pad(ts, inter_padding_size, dim):
     if dim == 0:
@@ -75,18 +77,19 @@ class QWenWeight(ModelDeployWeightInfo):
         return meta
 
 
-    def _process_meta(self, meta_dict):
-        if 'model' in meta_dict:
-            language_model = meta_dict['model']['language_model']
-            if 'encoder' in language_model:
-                meta_dict.update(language_model['encoder'])
-            if 'embedding' in language_model:
-                meta_dict['emb'] = language_model['embedding']['word_embeddings']['weight']
-            if 'output_layer' in language_model.keys():
-                meta_dict['lm_head'] =language_model['output_layer']['weight']
-            self._megatron = True
-        else:
-            self._megatron = False
+    def _process_meta(self, meta_dicts, weight_keys):
+        for meta_dict in meta_dicts:
+            if 'model' in meta_dict:
+                language_model = meta_dict['model']['language_model']
+                if 'encoder' in language_model:
+                    meta_dict.update(language_model['encoder'])
+                if 'embedding' in language_model:
+                    meta_dict['emb'] = language_model['embedding']['word_embeddings']['weight']
+                if 'output_layer' in language_model.keys():
+                    meta_dict['lm_head'] =language_model['output_layer']['weight']
+                self._megatron = True
+            else:
+                self._megatron = False
 
     def _get_weight_info(self):
         if self._megatron:
@@ -155,6 +158,48 @@ class QWenWeight(ModelDeployWeightInfo):
         ]
         return layer_weights
 
+    def _get_hf_qptq_weight_info(self, layer_id):
+        layer_quant_weights =[
+            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_1.weight', identity)],
+                       identity),
+            WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qweight', identity)],
+                       identity),
+            WeightInfo(W.attn_qkv_z, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qzeros', identity)],
+                       identity),
+            WeightInfo(W.attn_qkv_s, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.scales', identity)],
+                       identity),
+            WeightInfo(W.attn_qkv_b, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.bias', identity)],
+                       identity),
+            WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qweight', identity)],
+                       identity),
+            WeightInfo(W.attn_o_z, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qzeros', identity)],
+                       identity),
+            WeightInfo(W.attn_o_s, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.scales', identity)],
+                       identity),
+            WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.qweight', identity)],
+                       identity),
+            WeightInfo(W.ffn_z1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.qzeros', identity)],
+                       identity),
+            WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.scales', identity)],
+                       identity),
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qweight', identity)],
+                       identity),
+            WeightInfo(W.ffn_z3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qzeros', identity)],
+                       identity),
+            WeightInfo(W.ffn_s3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.scales', identity)],
+                       identity),
+            WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qweight', identity)],
+                       identity),
+            WeightInfo(W.ffn_z2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qzeros', identity)],
+                       identity),
+            WeightInfo(W.ffn_s2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.scales', identity)],
+                       identity),
+            WeightInfo(W.post_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_2.weight', identity)],
+                       identity),
+        ]
+        return layer_quant_weights
+        
+
     def _get_hf_weight_info(self):
         weights = [
             WeightInfo(W.embedding, [CkptWeightInfo('transformer.wte.weight', identity)], identity),
@@ -165,8 +210,12 @@ class QWenWeight(ModelDeployWeightInfo):
 
         layer_weights: List[List[WeightInfo]] = []
         for layer in range(self._num_layers):
-            w = self._get_hf_layer_weight_info(layer)
-            layer_weights.append(w)
+            if self._int4_mode:
+                w=self._get_hf_qptq_weight_info(layer)
+                layer_weights.append(w)
+            else:
+                w = self._get_hf_layer_weight_info(layer)
+                layer_weights.append(w)
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
 
@@ -179,7 +228,6 @@ class QWenBase(GPT):
     def _common_config(config, ckpt_path: str) -> GptInitModelParameters:
         config.rotary_embedding_dim = 128
         config.rotary_embedding_style = 1
-        config.use_gated_activation = True
         config.activation_type = 'SiGLU'
         config.has_pre_decoder_layernorm = False
         config.has_post_decoder_layernorm = True
@@ -210,6 +258,7 @@ class QWenBase(GPT):
         config.head_num = config_json.get("n_head", config_json.get("num_attention_heads", config.head_num))  # 如果2者不一致就是 attention sparse场景,headnum不能用attention的heads
         config.head_num_kv = config.head_num
         config.size_per_head = config_json.get("kv_channels", config.size_per_head)
+        config.hidden_size = config_json.get("hidden_size", config.hidden_size)
         config.inter_size = int(
             config_json.get("intermediate_size", config_json.get("ffn_hidden_size", hidden_to_inter(config.head_num * config.size_per_head) * 2)) / 2
         )
@@ -217,7 +266,27 @@ class QWenBase(GPT):
         config.layer_num = config_json.get("num_hidden_layers", config_json.get("n_layer", config.layer_num))
         config.vocab_size = config_json.get("vocab_size", config_json.get("padded_vocab_size", config.vocab_size))
         config.rotary_embedding_base = int(config_json.get('rotary_emb_base', 10000))
+        config.rotary_embedding_dim = config.size_per_head
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", config.special_tokens.eos_token_id)
+
+        quant_config = config_json.get("quantization_config", None)
+        if quant_config is not None:
+            quant_bits = quant_config.get("bits", 0)
+            if quant_bits != 4:
+                raise ValueError("Unsupported quant bits: %s" % (quant_bits))
+            config.quant_algo.int4_mode = True
+            group_size = quant_config.get("group_size", 0)
+            assert group_size == 128 or group_size == 64, "int4 only support group size == 64 or 128"
+            config.quant_algo.weight_only_group_size = group_size
+            quant_method = quant_config.get("quant_method", None)
+            if quant_method == 'awq':
+                config.quant_algo.is_awq = True
+                config.quant_algo.has_zeros = True
+            elif quant_method == 'gptq':
+                config.quant_algo.is_gptq = True
+                config.quant_algo.has_zeros = True
+            else: 
+                raise ValueError("Unsupported quant method: %s" % (quant_method))
 
         use_dynamic_ntk = config_json.get("use_dynamic_ntk")
         use_logn_attn = config_json.get("use_logn_attn")
@@ -227,12 +296,13 @@ class QWenBase(GPT):
             config.use_logn_attn = True
             config.logn_seq_len = config_json.get("seq_length")
 
-    def load_tokenizer(self):
-        self.tokenizer = QWenTokenizer.from_pretrained(self.config.tokenizer_path)
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        return QWenTokenizer.from_pretrained(config.tokenizer_path)
 
 class QWen(QWenBase):
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=0,
             head_num_kv=0,
@@ -246,8 +316,8 @@ class QWen(QWenBase):
         return config
 
 class QWen_7B(QWenBase):
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=32,
             head_num_kv=32,
@@ -260,8 +330,8 @@ class QWen_7B(QWenBase):
         return config
 
 class QWen_13B(QWenBase):
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=40,
             head_num_kv=40,
@@ -274,8 +344,8 @@ class QWen_13B(QWenBase):
         return config
 
 class QWen_1B8(QWenBase):
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=16,
             head_num_kv=16,
@@ -287,7 +357,7 @@ class QWen_1B8(QWenBase):
         QWenBase._common_config(config, ckpt_path)
         return config
 
-register_model('qwen', QWen)
+register_model('qwen', QWen, ["QWenLMHeadModel"])
 register_model('qwen_7b', QWen_7B)
 register_model('qwen_13b', QWen_13B)
 register_model('qwen_1b8', QWen_1B8)

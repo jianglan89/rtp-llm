@@ -4,11 +4,11 @@ import re
 import logging
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerBase
 from dataclasses import dataclass
 
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
-    ChatCompletionRequest, RoleEnum, FunctionCall
+    ChatCompletionRequest, RoleEnum, FunctionCall, RendererInfo
 from maga_transformer.openai.renderers.llama_template import Template, get_template_and_fix_tokenizer
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
@@ -24,29 +24,16 @@ class LlamaTemplateArgs:
     system: Optional[str] = None
 
 class LlamaTemplateRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: PreTrainedTokenizer, renderer_params: RendererParams):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         model_name = renderer_params.model_type
         self.template = get_template_and_fix_tokenizer(model_name, tokenizer)
+        self.add_extra_stop_words(self.template.stop_words)
 
-        extra_stop_words = self.template.stop_words
-        extra_stop_word_ids: List[List[int]] = []
-        for word in extra_stop_words:
-            token_id = tokenizer.convert_tokens_to_ids(word)
-            assert (token_id is int)
-            if token_id:
-                extra_stop_word_ids.append([token_id])
-            else:
-                extra_stop_word_ids.append(tokenizer.encode(word, add_special_tokens=True))
-        self.extra_stop_word_ids = extra_stop_word_ids
-        self.stop_word_ids_list.extend(extra_stop_word_ids)
-
-    def get_print_properties(self) -> dict:
-        properties = super().get_print_properties()
-        properties.update({
-            "template": self.template,
-        })
-        return properties
+    def get_renderer_info(self) -> RendererInfo:
+        renderer_info = super().get_renderer_info()
+        renderer_info.template = str(self.template)
+        return renderer_info
 
     def _extract_history(self, messages: List[ChatMessage]) -> LlamaTemplateArgs:
         # Messages must be formatted in the following way:
@@ -80,7 +67,7 @@ class LlamaTemplateRenderer(CustomChatRenderer):
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         template_args = self._extract_history(request.messages)
-        assert isinstance(self.tokenizer, PreTrainedTokenizer)
+        assert isinstance(self.tokenizer, PreTrainedTokenizerBase)
         encoded_ids = self.template.encode_oneturn(
             self.tokenizer,
             query=template_args.query,

@@ -15,8 +15,8 @@
  */
 
 #pragma once
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
 #include "src/fastertransformer/utils/LoRAWeight.h"
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #include "stdlib.h"
 
 namespace fastertransformer {
@@ -32,14 +32,19 @@ struct DenseWeight {
     const T2* bias      = nullptr;
     const T1* fp8_bias  = nullptr;
     const T1* sp_kernel = nullptr;
+
+    const float* scale       = nullptr;
+    const T2*    moe_scale   = nullptr;
+    const float* scale_inter = nullptr;
+    const float* scale_out   = nullptr;
+
+    // for weight only kernel
+    const T2* weight_only_quant_scale = nullptr;
     // for int8 kernel
-    const int8_t* int8_kernel             = nullptr;
-    const int8_t* int4_kernel             = nullptr;
-    const float*  scale                   = nullptr;
-    const T2*     weight_only_quant_scale = nullptr;
-    const T2*     moe_scale               = nullptr;
-    const float*  scale_inter             = nullptr;
-    const float*  scale_out               = nullptr;
+    const int8_t* int8_kernel = nullptr;
+    // for weight only int4 kernel
+    const int8_t* int4_kernel    = nullptr;
+    const int8_t* int4_zeros     = nullptr;
 
     // FP8 scales
     // scale = AMAX(tensor) / FP8_MAX

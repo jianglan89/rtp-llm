@@ -15,9 +15,7 @@ from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, LoRAMo
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.ckpt_database import CkptDatabase
-from maga_transformer.ops.gpt_ops.gpt_decoder import GptDecoder
-from maga_transformer.ops.gpt_ops.gpt_context_decoder import GptContextDecoder
+from maga_transformer.utils.database import CkptDatabase, ModuleDatabase
 from maga_transformer.models.gpt_util.prefix_encoder import PrefixEncoder
 from maga_transformer.models.gpt_util.medusa_head import MedusaHead
 from maga_transformer.models.base_model import BaseModel
@@ -35,13 +33,19 @@ class Embedding(torch.nn.Module):
     def __init__(self, all_gather):
         super().__init__()
         self._emb = None
+        self._scalar: Optional[float] = None
         self._all_gather = all_gather
 
     def set_weight(self, emb):
         self._emb = emb
 
+    def set_scalar(self, scalar):
+        self._scalar = scalar
+
     def forward(self, input):
         output = F.embedding(input, self._emb)
+        if self._scalar:
+            output = output * self._scalar
         if self._all_gather:
             return all_gather(output)
         return output
@@ -63,23 +67,14 @@ class Linear(torch.nn.Module):
             return all_gather(output)
         return output
 
-class GPTTokenizer:
-    def __init__(self, tokenizer_path: str):
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
-    def decode(self, tokens: List[int]) -> str:
-        return self.tokenizer.decode(tokens)
-
-    def encode(self, prompts: str) -> List[int]:
-        return self.tokenizer.encode(prompts)
-
-    @property
-    def eos_token_id(self):
-        return self.tokenizer.eos_token_id
-
 class GPT(BaseModel):
     def __init__(self, config: GptInitModelParameters):
         super().__init__()
+
+        # 兼容逻辑
+        if os.environ.get('USE_BLOCK_CACHE') is not None:
+            os.environ["REUSE_CACHE"] = os.environ.get('USE_BLOCK_CACHE')
+
         self.config = config
         compute_dtype = to_torch_dtype(self.config.data_type)
 
@@ -90,61 +85,53 @@ class GPT(BaseModel):
         # torch.classes.load_library(os.path.abspath(lib_path)) # type: ignore
 
         # Embeddings to encode or decode tokens.
-        hidden_dim = self.config.head_num * self.config.size_per_head
+        hidden_dim = self.config.gpt_init_params.hidden_size
         all_gather = self.config.tp_split_emb_and_lm_head and g_parallel_info.tp_size > 1
+        assert(hidden_dim != 0)
 
-        self.register_param(
-            'context_decoder',
-            self.get_context_decoder_cls(config))
-        self.register_param('decoder', self.get_decoder_cls(config))
 
         self.prefix_encoder = None
         if config.pre_seq_len is not None and config.pre_seq_len > 0:
             self.prefix_tokens = torch.arange(config.pre_seq_len).long()
-            self.register_param(
-                'prefix_encoder',
-                PrefixEncoder(config))
+            self.prefix_encoder = PrefixEncoder(config)
 
         self.medusa_head: Optional[torch.nn.Module] = None
         if config.gpt_init_params.use_medusa:
-            self.register_param(
-                'medusa_head',
-                MedusaHead(config))
+            self.medusa_head = MedusaHead(config)
 
         if g_parallel_info.is_pp_first:
-            self.register_param('word_embedding', Embedding(all_gather))
+            self.word_embedding = Embedding(all_gather)
             if self.config.has_positional_encoding:
-                self.register_param(
-                    'position_encoding',
-                    torch.nn.Embedding(self.config.max_seq_len, hidden_dim, dtype=compute_dtype, device='cuda:0'))
+                self.position_encoding =torch.nn.Embedding(self.config.max_seq_len, hidden_dim, dtype=compute_dtype, device='cuda:0')
             else:
                 self.position_encoding = None
 
+            if self.config.type_vocab_size > 0:
+                self.token_type_embeddings = torch.nn.Embedding(self.config.type_vocab_size, hidden_dim)
+            else:
+                self.token_type_embeddings = None
+
             if self.config.has_pre_decoder_layernorm:
                 if self.config.norm_type == 'layernorm' or self.config.norm_type == 'alphanorm':
-                    self.register_param(
-                        'pre_decoder_layernorm',
-                        torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=compute_dtype).to('cuda:0'))
+                    self.pre_decoder_layernorm = torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=compute_dtype).to('cuda:0')
                 elif self.config.norm_type == 'rmsnorm':
-                    self.register_param(
-                        'pre_decoder_layernorm',
-                        RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0'))
+
+                    self.pre_decoder_layernorm = RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0')
             else:
                 self.pre_decoder_layernorm = None
 
         if g_parallel_info.is_pp_last:
             if self.config.has_post_decoder_layernorm:
                 if self.config.norm_type == 'layernorm' or self.config.norm_type == 'alphanorm':
-                    self.register_param(
-                        'post_decoder_layernorm',
-                        torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=compute_dtype).to('cuda:0'))
+                    self.post_decoder_layernorm = torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=compute_dtype).to('cuda:0')
                 elif self.config.norm_type == 'rmsnorm':
-                    self.register_param(
-                        'post_decoder_layernorm',
-                        RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0'))
+                    self.post_decoder_layernorm = RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0')
             else:
                 self.post_decoder_layernorm = None
-            self.register_param('lm_head', Linear(all_gather))
+            if self.config.has_lm_head:
+                self.lm_head = Linear(all_gather)
+            else:
+                self.lm_head = None
 
         self.load_tokenizer()
         self.load()
@@ -181,17 +168,19 @@ class GPT(BaseModel):
     def from_config(cls, config: GptInitModelParameters):
         return cls(config)
 
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        assert config.tokenizer_path
+        return AutoTokenizer.from_pretrained(config.tokenizer_path, trust_remote_code=True)
+
     def load_tokenizer(self):
-        self.tokenizer = None
         if self.config.tokenizer_path:
-            self.tokenizer = GPTTokenizer(self.config.tokenizer_path)
-            self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+            self.tokenizer = self.get_tokenizer(self.config)
+            if hasattr(self.tokenizer, 'eos_token_id') and self.tokenizer.eos_token_id:
+                self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
 
     @staticmethod
     def get_weight_cls() -> ModelDeployWeightInfo:
-        raise NotImplementedError
-
-    def load_vit_weight(self, ctype: str):
         raise NotImplementedError
 
     def update(self, lora_infos: Dict[str, str]):
@@ -200,45 +189,62 @@ class GPT(BaseModel):
         logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
     def load(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        self._load_weights(self.config.ref_model, device)
+        self._initialize_from_weight(device)
+
+    def _load_weights(self, ref_model: Optional[torch.nn.Module] = None, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         device = device or get_device()
         compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
 
-        assert(self.context_decoder)
-        assert(self.decoder)
 
         with Timer() as timer:
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
-            database = CkptDatabase(self.config.ckpt_path)
+            if ref_model is not None:
+                database = ModuleDatabase(ref_model)
+            else:
+                database = CkptDatabase(self.config.ckpt_path)
+                database.load_ptuning(self.config.ptuning_path)
+            if self.config.lora_infos is not None and len(self.config.lora_infos) == 1:
+                for name, path in self.config.lora_infos.items():
+                    database.load_lora(name, path)
             load_parallel_num = estimate_load_parallel_num(
                 self.config, g_parallel_info.tp_size)
             model_weights_loader = get_model_weights_loader(weights_info, database, compute_dtype=compute_dtype)
-            self.weight = model_weights_loader.load_weights_from_scratch(weights_info._int8_mode, num_process=load_parallel_num)
+            self.weight = model_weights_loader.load_weights_from_scratch(num_process=load_parallel_num)
             model_weights_loader.show_warns()
 
             self.weight.lora_resource = LoraResource({}, database, weights_info, LoRAMap())
             self.weight.lora_resource.model_weights_loader = model_weights_loader
-            self.weight.lora_resource.ft_op = [self.context_decoder, self.decoder]
-            if self.config.lora_infos is not None:
+            if self.config.lora_infos is not None and len(self.config.lora_infos) > 1:
                 self.update(self.config.lora_infos)
 
         logging.info(f'load weights time: {timer.cost_ms() / 1000 :.2f} s')
 
-        self.context_decoder.set_weight(self.weight)
-        self.decoder.set_weight(self.weight)
-
+    def _initialize_from_weight(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
+        
+        assert self.word_embedding is not None
         self.word_embedding.set_weight(self.weight.steal_pytorch_weight(W.embedding))
-        if self.weight.has_pytorch_weight(W.lm_head):
-            lm_head_w = self.weight.steal_pytorch_weight(W.lm_head)
-        else:
-            lm_head_w = self.word_embedding._emb
-        self.lm_head.set_weight(lm_head_w, self.weight.steal_pytorch_weight(W.lm_head_b))
-        if self.config.tp_split_emb_and_lm_head:
-            self.vocab_size_padded = self.lm_head._w.shape[0] * g_parallel_info.tp_size
-        else:
-            self.vocab_size_padded = self.lm_head._w.shape[0]
+        if (self.config.input_embedding_scalar - 1 > 1e-6):
+            self.word_embedding.set_scalar(self.config.input_embedding_scalar)
+        if self.lm_head is not None:
+            if self.weight.has_pytorch_weight(W.lm_head):
+                lm_head_w = self.weight.steal_pytorch_weight(W.lm_head)
+            else:
+                lm_head_w = self.word_embedding._emb
+            if self.config.normalize_lm_head_weight:
+                self.lm_head.set_weight(F.normalize(lm_head_w), self.weight.steal_pytorch_weight(W.lm_head_b))
+            else:
+                self.lm_head.set_weight(lm_head_w, self.weight.steal_pytorch_weight(W.lm_head_b))
+        if self.lm_head is not None:
+            if self.config.tp_split_emb_and_lm_head:
+                self.vocab_size_padded = self.lm_head._w.shape[0] * g_parallel_info.tp_size
+            else:
+                self.vocab_size_padded = self.lm_head._w.shape[0]
 
         def _safe_load_from_module(param: torch.nn.Parameter, fname: str):
             # np_w is 1-D array since a bin file doesn't have shape info.
+            print(f"load {fname} to {param.data.shape}")
             param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to('cuda:0')
 
         def _safe_load_prefix_encoder_weight_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
@@ -266,11 +272,14 @@ class GPT(BaseModel):
 
         # pylint:disable=line-too-long
         if g_parallel_info.is_pp_first:
-            if self.is_multimodal:
+            if self.is_multimodal():
                 self.load_vit_weight(compute_dtype)
             if self.position_encoding is not None:
                 self.position_encoding.weight.data = \
-                    (self.weight.steal_pytorch_weight(W.wpe))[:self.config.max_seq_len].reshape(self.position_encoding.weight.data.shape).to('cuda:0')
+                    (self.weight.steal_pytorch_weight(W.positional_embedding))[:self.config.max_seq_len].reshape(self.position_encoding.weight.data.shape).to('cuda:0')
+            if self.token_type_embeddings is not None:
+                self.token_type_embeddings.weight.data = \
+                    (self.weight.steal_pytorch_weight(W.token_type_embedding)).reshape(self.token_type_embeddings.weight.data.shape).to('cuda:0')
             if self.pre_decoder_layernorm is not None:
                 _safe_load_from_module(self.pre_decoder_layernorm.weight, W.pre_decoder_ln_gamma)
                 _safe_load_from_module(self.pre_decoder_layernorm.bias, W.pre_decoder_ln_beta)

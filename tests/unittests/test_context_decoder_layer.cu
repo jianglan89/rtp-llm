@@ -6,16 +6,15 @@
 #include <tuple>
 #include <vector>
 
-#include "src/fastertransformer/layers/DenseWeight.h"
-#include "src/fastertransformer/utils/allocator.h"
-#include "src/fastertransformer/utils/cublasMMWrapper.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
-#include "src/fastertransformer/utils/gemm.h"
+#include "src/fastertransformer/utils/DenseWeight.h"
+#include "src/fastertransformer/cuda/allocator_cuda.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/cuda/gemm.h"
 #include "src/fastertransformer/utils/logger.h"
-#include "src/fastertransformer/utils/memory_utils.h"
-#include "src/fastertransformer/utils/Tensor.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
-#include "src/fastertransformer/utils/allocator_impl.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
+#include "src/fastertransformer/core/Tensor.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGpt.h"
@@ -38,7 +37,6 @@ static const char* usage =
 template <typename T>
 bool test_context_sharing(const std::string& weight_dir, const std::string& data_dir);
 Tensor create_tensor(MemoryType memory_type, DataType data_type, std::vector<size_t> shape, bool init_zero);
-void allocate_tensors(std::vector<Tensor> &tensors);
 void free_tensors(std::vector<Tensor> &tensors);
 void free_tensors(TensorMap &tensors);
 template<typename T> bool all_close(Tensor &tensor_x, Tensor &tensor_y);
@@ -126,7 +124,7 @@ bool test_context_sharing(const std::string& weight_dir, const std::string& data
     init_parameter.head_num_ = head_num;
     init_parameter.size_per_head_ = size_per_head;
     init_parameter.inter_size_ = inter_size;
-    init_parameter.num_layers_ = num_layer;    
+    init_parameter.num_layers_ = num_layer;
     init_parameter.expert_num_ = 0;
     init_parameter.moe_k_ = 0;
     init_parameter.moe_layer_index_ = {};
@@ -154,8 +152,8 @@ bool test_context_sharing(const std::string& weight_dir, const std::string& data
 
     auto decoder_inputs = TensorMap::fromNpyFolder(data_dir);
 
-    const size_t seq_num = decoder_inputs.at("decoder_input").shape[0];
-    const size_t seq_len = decoder_inputs.at("decoder_input").shape[1];
+    const size_t seq_num = decoder_inputs.at("decoder_input").shape()[0];
+    const size_t seq_len = decoder_inputs.at("decoder_input").shape()[1];
 
     const std::vector<size_t> self_k_cache_shape = {num_layer / 1,
                                                     seq_num,
@@ -215,31 +213,17 @@ bool test_context_sharing(const std::string& weight_dir, const std::string& data
 
 Tensor tensor_to_cpu(Tensor &tensor)
 {
-    FT_CHECK(tensor.where == MEMORY_GPU);
+    FT_CHECK(tensor.where() == MEMORY_GPU);
     void *host_ptr = malloc(tensor.sizeBytes());
-    cudaMemcpy(host_ptr, tensor.data, tensor.sizeBytes(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(host_ptr, tensor.data(), tensor.sizeBytes(), cudaMemcpyDeviceToHost);
 
-    return Tensor {MEMORY_CPU, tensor.type, tensor.shape, host_ptr};
-}
-
-void allocate_tensors(std::vector<Tensor> &tensors)
-{
-    for (auto &tensor : tensors) {
-        auto size = std::accumulate(tensor.shape.begin(), tensor.shape.end(), 1, std::multiplies<size_t>());
-        auto size_bytes = size * Tensor::getTypeSize(tensor.type);
-        if (tensor.where == MEMORY_GPU) {
-            cudaMalloc(&tensor.data, size_bytes);
-        }
-        else {
-            tensor.data = malloc(size_bytes);
-        }
-    }
+    return Tensor {MEMORY_CPU, tensor.type(), tensor.shape(), host_ptr};
 }
 
 Tensor create_tensor(MemoryType memory_type, DataType data_type, std::vector<size_t> shape, bool init_zero)
 {
     auto size = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
-    auto size_bytes = size * Tensor::getTypeSize(data_type);
+    auto size_bytes = size * getTypeSize(data_type);
 
     void* data = nullptr;
     if (memory_type == MEMORY_GPU) {
@@ -260,13 +244,12 @@ Tensor create_tensor(MemoryType memory_type, DataType data_type, std::vector<siz
 void free_tensors(std::vector<Tensor> &tensors)
 {
     for (auto &tensor : tensors) {
-        if (tensor.where == MEMORY_GPU) {
-            cudaFree((void *) tensor.data);
+        if (tensor.where() == MEMORY_GPU) {
+            cudaFree((void *) tensor.data());
         }
         else {
-            free((void *) tensor.data);
+            free((void *) tensor.data());
         }
-        tensor.data = nullptr;
     }
 }
 
@@ -274,13 +257,12 @@ void free_tensors(TensorMap &tensors)
 {
     for (auto &key : tensors.keys()) {
         Tensor tensor = tensors.at(key);
-        if (tensor.where == MEMORY_GPU) {
-            cudaFree((void *)tensor.data);
+        if (tensor.where() == MEMORY_GPU) {
+            cudaFree((void *)tensor.data());
         }
         else {
-            free((void *)tensor.data);
+            free((void *)tensor.data());
         }
-        tensor.data = nullptr;
     }
 }
 template<typename T>
@@ -301,8 +283,8 @@ bool all_close(Tensor &tensor_x, Tensor &tensor_y)
         FT_CHECK(fabsf(x_value - y_value) <= (a_tol + r_tol * fabsf(y_value)));
     }
 
-    free((void *) tensor_x_h.data);
-    free((void *) tensor_y_h.data);
+    free((void *) tensor_x_h.data());
+    free((void *) tensor_y_h.data());
 
     return true;
 }

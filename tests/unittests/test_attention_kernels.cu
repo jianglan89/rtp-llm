@@ -18,9 +18,9 @@
 #include "src/fastertransformer/kernels/gen_relative_pos_bias.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
-#include "src/fastertransformer/utils/memory_utils.h"
-#include "src/fastertransformer/utils/nccl_utils.h"
-#include "src/fastertransformer/utils/Tensor.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
+#include "src/fastertransformer/core/Tensor.h"
 
 #include <curand.h>
 #include <sstream>
@@ -102,7 +102,7 @@ template<typename T>
 void normal(curandGenerator_t curng, Tensor& tensor, float mean = 0.0f, float stddev = 1.0f)
 {
     if (tensor.size() > 0) {
-        FT_CHECK(tensor.type == getTensorType<T>());
+        FT_CHECK(tensor.type() == getTensorType<T>());
         normal(curng, tensor.getPtr<T>(), tensor.size(), mean, stddev);
     }
 }

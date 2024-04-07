@@ -5,7 +5,7 @@ from functools import lru_cache
 from packaging import version
 import json
 
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerBase
 from dataclasses import dataclass
 
 import jinja2
@@ -13,8 +13,8 @@ from jinja2.exceptions import TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, \
-    RendererParams, StreamResponseObject, RenderedInputs
-from maga_transformer.models.base_model import BaseTokenizer, GenerateOutput
+    RendererParams, StreamResponseObject, RenderedInputs, RendererInfo
+from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
 
@@ -33,13 +33,13 @@ class PromptWithImages:
     prompt: str
     image_urls: List[str]
 
-# This class is designed to replace `PreTrainedTokenizer.apply_chat_template` functionality,
+# This class is designed to replace `PreTrainedTokenizerBase.apply_chat_template` functionality,
 # providing more capability to customize the template.
 # More specifically, this method allows template to use `functions` field, following openai chat api format.
-# Besides that, other template elements is compatible with `PreTrainedTokenizer.apply_chat_template`.
+# Besides that, other template elements is compatible with `PreTrainedTokenizerBase.apply_chat_template`.
 class BasicRenderer(CustomChatRenderer):
     def __init__(self,
-                 tokenizer: Union[PreTrainedTokenizer, BaseTokenizer],
+                 tokenizer: PreTrainedTokenizerBase,
                  renderer_params: RendererParams,
     ):
         super().__init__(tokenizer, renderer_params)
@@ -63,30 +63,23 @@ class BasicRenderer(CustomChatRenderer):
                 assert (self.chat_template != None)
             except:
                 logging.info(f"tokenizer {tokenizer} has no chat_template nor "
-                                "default_chat_template attribute. Use default template.")
+                              "default_chat_template attribute. Use default template.")
                 self.chat_template = DEFAULT_CHAT_API_TEMPLATE
-                self.extra_stop_word_ids_list.append(self.tokenizer.encode("<|im_end|>"))
+                self.add_extra_stop_words(["<|im_end|>"])
 
         try:
-            self.extra_stop_words = tokenizer.additional_special_tokens
-            if self.extra_stop_words != None:
-                self.stop_words_list.extend(self.extra_stop_words)
-                self.extra_stop_word_ids_list.extend(
-                    [self.tokenizer.encode(extra_stop_word) for extra_stop_word in self.extra_stop_words]
-                )
+            if tokenizer.additional_special_tokens != None:
+                self.add_extra_stop_words(tokenizer.additional_special_tokens)
         except:
             pass
-        self.stop_word_ids_list.extend(self.extra_stop_word_ids_list)
 
         logging.info(f"use chat template: [ {self.chat_template} ]  ")
         self.compiled_template = self._compile_jinja_template(self.chat_template)
 
-    def get_print_properties(self) -> dict:
-        properties = super().get_print_properties()
-        properties.update({
-            "chat_template": self.chat_template
-        })
-        return properties
+    def get_renderer_info(self) -> RendererInfo:
+        renderer_info = super().get_renderer_info()
+        renderer_info.template = self.chat_template
+        return renderer_info
 
     @lru_cache
     def _compile_jinja_template(self, chat_template) -> jinja2.Template:

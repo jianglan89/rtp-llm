@@ -16,17 +16,17 @@
 
 #pragma once
 #include "src/fastertransformer/kernels/gen_relative_pos_bias.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #ifdef ENABLE_FP8
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #endif  // ENABLE_FP8
 
 namespace fastertransformer {
 
 void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
-                                        size_t*      h_token_num,
+                                        int*         h_token_num,
                                         int*         tmp_mask_offset,
                                         int*         cu_seqlens,
                                         const int*   sequence_length,
@@ -34,17 +34,13 @@ void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
                                         const int    max_seq_len,
                                         cudaStream_t stream);
 
-inline void invokeGetPaddingOffset(size_t*      h_pinned_token_num,
-                                   size_t*      h_token_num,
-                                   int*         tmp_mask_offset,
-                                   const int*   sequence_length,
-                                   const int    batch_size,
-                                   const int    max_seq_len,
-                                   cudaStream_t stream)
-{
-    invokeGetPaddingOffsetAndCuSeqLens(
-        h_pinned_token_num, h_token_num, tmp_mask_offset, nullptr, sequence_length, batch_size, max_seq_len, stream);
-}
+void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
+                                        int*         tmp_mask_offset,
+                                        int*         cu_seqlens,
+                                        const int*   sequence_length,
+                                        const int    batch_size,
+                                        const int    max_seq_len,
+                                        cudaStream_t stream);
 
 template<typename T>
 void invokeBuildEncoderAttentionMask(

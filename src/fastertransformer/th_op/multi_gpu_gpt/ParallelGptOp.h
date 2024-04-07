@@ -2,9 +2,9 @@
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLoRALayerWeight.h"
 #include "src/fastertransformer/th_op/th_utils.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
-#include "src/fastertransformer/utils/nccl_utils.h"
-#include "src/fastertransformer/utils/allocator.h"
+
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
+#include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 
 namespace ft = fastertransformer;
@@ -14,8 +14,8 @@ class IFtGpt {
 public:
     virtual ~IFtGpt() {}
     virtual void forward(th::Tensor&              decoder_output,
-                         th::Tensor&              key_cache,
-                         th::Tensor&              value_cache,
+                         th::optional<th::Tensor> key_cache,
+                         th::optional<th::Tensor> value_cache,
                          th::Tensor&              decoder_input,
                          th::Tensor&              input_lengths,
                          th::Tensor&              sequence_lengths,
@@ -35,6 +35,7 @@ public:
                         const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights)=0;
 
     virtual void removeLoRA(const int lora_id)=0;
+    virtual bool UseFMHA()=0;
 };
 
 template<typename T>
@@ -45,16 +46,14 @@ public:
           const int                     pipeline_para_size,
           const std::string&            master_ip,
           const int                     master_port,
-          const std::vector<std::unordered_map<std::string, th::Tensor>> &weights,
-          const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_weights,
-          const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_scales);
+          const std::vector<std::unordered_map<std::string, th::Tensor>> &weights);
 
     ~FtGpt() override;
 
     // bool initMem(ft::IAllocator* allocator);
     void forward(th::Tensor&              decoder_output,
-                 th::Tensor&              key_cache,
-                 th::Tensor&              value_cache,
+                 th::optional<th::Tensor> key_cache,
+                 th::optional<th::Tensor> value_cache,
                  th::Tensor&              decoder_input,
                  th::Tensor&              input_lengths,
                  th::Tensor&              sequence_lengths,
@@ -75,12 +74,12 @@ public:
 
     virtual void removeLoRA(const int lora_id) override;
 
+    virtual bool UseFMHA() override;
+
 private:
     const GptInitParameter& gpt_init_parameter_;
 
     const std::vector<std::unordered_map<std::string, th::Tensor>> weights_;
-    const std::vector<std::unordered_map<std::string, th::Tensor>> int8_weights_;
-    const std::vector<std::unordered_map<std::string, th::Tensor>> int8_scales_;
 
     ft::NcclParam tensor_para_;
     ft::NcclParam pipeline_para_;
@@ -88,7 +87,7 @@ private:
     cublasLtHandle_t      cublaslt_handle_;
     std::mutex*           cublas_wrapper_mutex_;
     ft::cublasAlgoMap*    cublas_algo_map_;
-    ft::ParallelGpt<T>*   gpt_context_decoder_;
+    ft::ParallelGpt<T>*   parallel_gpt_;
     ft::Allocator<ft::AllocatorType::TH>* allocator_;
     ft::cublasMMWrapper* cublas_wrapper_;
     struct cudaDeviceProp prop_;
@@ -99,20 +98,18 @@ private:
 
 class ParallelGptOp: public th::jit::CustomClassHolder {
 public:
-    ParallelGptOp(c10::intrusive_ptr<GptInitParameter> gpt_init_parameter,
-                  const int64_t                        tensor_para_size,
-                  const int64_t                        pipeline_para_size,
-                  const std::string                    master_ip,
-                  const int64_t                        master_port,
-                  const std::vector<std::unordered_map<std::string, th::Tensor>> &weights,
-                  const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_weights,
-                  const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_scales);
+    ParallelGptOp(c10::intrusive_ptr<GptInitParameter>                            gpt_init_parameter,
+                  const int64_t                                                   tensor_para_size,
+                  const int64_t                                                   pipeline_para_size,
+                  const std::string                                               master_ip,
+                  const int64_t                                                   master_port,
+                  const std::vector<std::unordered_map<std::string, th::Tensor>>& weights);
 
     ~ParallelGptOp();
 
     th::Tensor forward(th::Tensor               decoder_input,
-                       th::Tensor               key_cache,
-                       th::Tensor               value_cache,
+                       th::optional<th::Tensor> key_cache,
+                       th::optional<th::Tensor> value_cache,
                        th::Tensor               input_lengths,
                        th::Tensor               sequence_lengths,
                        th::Tensor               block_index_map,
@@ -131,6 +128,8 @@ public:
                          const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_a_weights,
                          const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights);
     void removeLoRA(const int64_t lora_id);
+
+    bool UseFMHA();
 
 private:
     GptInitParameter        gpt_init_parameter_;

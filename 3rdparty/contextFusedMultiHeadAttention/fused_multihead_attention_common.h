@@ -179,7 +179,7 @@ struct Fused_multihead_attention_paged_kv_params_v2
     // The Q matrices.
     const void* q_ptr;
     // Paged KV Cache buffer.
-    fastertransformer::KVBlockArray paged_kv_cache;
+    fastertransformer::KVBlockArrayForContextFMHA paged_kv_cache;
     // The O matrix (output).
     void* o_ptr;
     // The packed mask for random mask.
@@ -222,6 +222,10 @@ struct Fused_multihead_attention_paged_kv_params_v2
     //  and each points to [Tokens_per_block, H, D] contiguous memory.
     cudaTmaDesc* tma_desc_paged_kv;
 
+    // Paged KV load.
+    int blocks_per_tma_load;
+    int blocks_per_tma_load_log2;
+
     // In multi-query or grouped-query attention (MQA/GQA), several Q heads are associated with one KV head
     int h_kv = 0;
     int h_q_per_kv = 0;
@@ -259,6 +263,9 @@ struct Fused_multihead_attention_paged_kv_params_v2
         cu_q_seqlens = nullptr;
         use_int8_scale_max = false;
 
+        blocks_per_tma_load = 1;
+        blocks_per_tma_load_log2 = 0;
+
         h_kv = 0;
         h_q_per_kv = 0;
         sliding_window_size = INT_MAX;
@@ -276,6 +283,8 @@ struct Launch_params
     int kernel_s = 0;
     // kv_seq_length to set launch strategies.
     int kernel_kv_s = 0;
+    // padded head size (new power of 2) for tma descriptors.
+    int padded_d = 0;
     // flags to control small batch kernel choice
     // true: never unroll
     bool ignore_b1opt = false;
@@ -303,6 +312,9 @@ struct Launch_params
     ContextAttentionMaskType attention_mask_type = ContextAttentionMaskType::PADDING;
     // use specialized kernels without alibi support.
     bool useKernelWithoutAlibi = false;
+    // enable exp2 optimization (which helps improve performance).
+    // note that this is not compatible with alibi bias due to the accuracy issues.
+    bool useBase2ExpTrick = false;
     // harward properties to determine how to launch blocks
     int multi_processor_count = 0;
     int device_l2_cache_size = 0;
@@ -311,6 +323,7 @@ struct Launch_params
     {
         kernel_s = 0;
         kernel_kv_s = 0;
+        padded_d = 0;
         force_unroll = false;
         use_tma = false;
         flash_attention = false;
@@ -320,6 +333,7 @@ struct Launch_params
             ? ContextAttentionMaskType::PADDING
             : ContextAttentionMaskType::CAUSAL;
         useKernelWithoutAlibi = false;
+        useBase2ExpTrick = false;
     }
 };
 

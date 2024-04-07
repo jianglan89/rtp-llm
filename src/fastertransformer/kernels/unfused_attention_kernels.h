@@ -16,7 +16,7 @@
 #pragma once
 
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include "src/fastertransformer/utils/Tensor.h"
+#include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 
 namespace fastertransformer {
@@ -138,8 +138,7 @@ void invokeAddFusedQKVBiasTranspose(T*           q_buf,
                                     const int    head_num,
                                     const int    head_num_kv,
                                     const int    size_per_head,
-                                    cudaStream_t stream)
-{
+                                    cudaStream_t stream) {
     invokeAddFusedQKVBiasTranspose(q_buf,
                                    k_buf,
                                    v_buf,

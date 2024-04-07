@@ -1,7 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 load("@rules_python//experimental/python:wheel.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
-load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "pyc_wheel")
+load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel")
 load("//bazel:arch_select.bzl", "requirement", "whl_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
@@ -22,7 +22,13 @@ requirement([
     "torch",
     "torchvision",
     "einops",
-    "prettytable"
+    "prettytable",
+    "timm",
+    "aiohttp",
+    "tensorrt",
+    "onnx",
+    "sentence-transformers",
+    "orjson"
 ])
 
 py_library(
@@ -70,13 +76,6 @@ py_library(
 )
 
 py_library(
-    name = "vision_transformer",
-    srcs = glob([
-        "vision_transformer/*.py"
-    ])
-)
-
-py_library(
     name = "models",
     srcs = glob([
         "models/*.py",
@@ -84,6 +83,7 @@ py_library(
     ], exclude=["models/test/*.py"]),
     deps = [
         ":sentencepiece",
+        ":sentence-transformers",
         ":transformers",
         ":prettytable",
         ":pynvml",
@@ -92,9 +92,12 @@ py_library(
         ":Pillow",
         ":torch",
         ":torchvision",
+        ":einops",
         ":utils",
         ":ops",
-        ":vision_transformer"
+        ":timm",
+        ":tensorrt",
+        ":onnx"
     ],
 )
 
@@ -107,6 +110,13 @@ py_library(
 )
 
 py_library(
+    name = "structure",
+    srcs = glob([
+        "structure/*.py",
+    ])
+)
+
+py_library(
     name = "async_model",
     srcs = glob([
         "async_decoder_engine/**/*.py",
@@ -114,7 +124,8 @@ py_library(
     deps = [
         ":utils",
         ":ops",
-        ":config"
+        ":config",
+        ":structure",
     ],
 )
 
@@ -129,19 +140,36 @@ py_library(
         ":utils",
         ":ops",
         ":config",
+        ":structure",
     ],
 )
 
 py_library(
     name = "sdk",
-    srcs = glob([
-        "*.py",
-    ]),
+    srcs = [
+        '__init__.py',
+        'model_factory.py',
+        'start_server.py',
+        '_ft_pickler.py',
+        'model_factory_register.py',
+    ],
     deps = [
+        "//maga_transformer/server:server",
         ":models",
         ":uvicorn",
         ":fastapi",
         ":psutil",
+    ],
+    imports = ["."],
+)
+
+py_library(
+    name = "kserve_server",
+    srcs = [
+        'kserve_server.py',
+    ],
+    deps = [
+        ":sdk",
     ],
     imports = ["."],
 )
@@ -161,6 +189,13 @@ py_library(
 )
 
 py_library(
+    name = "embedding",
+    srcs = glob([
+        "embedding/*.py",
+    ])
+)
+
+py_library(
     name = "maga_transformer_lib",
     deps = [
         ":utils",
@@ -168,9 +203,12 @@ py_library(
         ":pipeline",
         ":models",
         ":config",
+        ":structure",
+        "//maga_transformer/server:server",
         ":plugins",
         ":async_model",
         ":openai_api",
+        ":embedding",
         ":sdk",
         "//maga_transformer/tools:save_ft_module",
         "//maga_transformer/tools:model_assistant",
@@ -201,13 +239,13 @@ py_wheel(
     distribution = "maga_transformer",
     python_tag = "py3",
     tags = ["manual", "local"],
-    version = "0.0.1",
+    version = "0.1.9",
     deps = [
         ":maga_transformer_package",
         "//deps:extension_package",
     ],
     requires=[
-        "filelock",
+        "filelock==3.13.1",
         "jinja2",
         "sympy",
         "typing-extensions",
@@ -230,26 +268,71 @@ py_wheel(
         "Pillow",
         "protobuf==3.20.0",
         "torchvision==0.16.0",
+        "einops",
         "prettytable",
-        "pydantic>=2.5.3",
+        "pydantic==2.5.3",
+        "timm==0.9.12",
+        "sentence-transformers==2.3.1"
     ] + whl_deps(),
 )
 
-pyc_wheel(
+py_wheel(
+    name = "maga_transformer_kserve_whl",
+    distribution = "maga_transformer",
+    python_tag = "py3",
+    tags = ["manual", "local"],
+    version = "0.1.9",
+    deps = [
+        ":maga_transformer_package",
+        "//deps:extension_package",
+    ],
+    requires=[
+        "filelock==3.13.1",
+        "jinja2",
+        "sympy",
+        "typing-extensions",
+        "importlib_metadata",
+        "transformers==4.33.1",
+        "sentencepiece==0.1.99",
+        "fastapi==0.108.0",
+        "uvicorn==0.21.1",
+        "dacite",
+        "pynvml",
+        "thrift",
+        "numpy==1.24.1",
+        "psutil",
+        "tiktoken==0.4.0",
+        "lru-dict",
+        "py-spy",
+        "safetensors",
+        "cpm_kernels",
+        "pyodps",
+        "Pillow",
+        "protobuf==3.20.0",
+        "torchvision==0.16.0",
+        "einops",
+        "prettytable",
+        "pydantic==2.5.3",
+        "timm==0.9.12",
+        "kserve",
+    ] + whl_deps(),
+)
+
+rename_wheel(
     name = "maga_transformer",
-    package_name = "maga_transformer-0.1.1",
+    package_name = "maga_transformer-0.1.9",
     src = ":maga_transformer_whl",
 )
 
-pyc_wheel(
+rename_wheel(
     name = "maga_transformer_cuda11",
-    package_name = "maga_transformer-0.1.1+cuda118",
+    package_name = "maga_transformer-0.1.9+cuda118",
     src = ":maga_transformer_whl",
 )
 
-pyc_wheel(
+rename_wheel(
     name = "maga_transformer_cuda12",
-    package_name = "maga_transformer-0.1.1+cuda121",
+    package_name = "maga_transformer-0.1.9+cuda121",
     src = ":maga_transformer_whl",
 )
 
@@ -260,5 +343,6 @@ py_library(
     ],
     deps = [
         ":maga_transformer_lib",
+        ":aiohttp",
     ]
 )

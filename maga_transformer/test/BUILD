@@ -10,8 +10,7 @@ py_test(
     ],
     deps = [
         "//maga_transformer:testlib",
-    ],
-    imports = ["aios/kmonitor/python_client"],
+    ]
 )
 
 py_test(
@@ -68,6 +67,22 @@ py_test(
     ],
     data = [
         "//maga_transformer/test/model_test/fake_test/testdata:testdata",
+        "//maga_transformer/test/tokenizer_test:testdata",
+    ],
+)
+
+py_test(
+    name = "openai_response_test",
+    srcs = [
+        "openai_response_test.py",
+    ],
+    deps = [
+        "//maga_transformer:sdk",
+        "//maga_transformer:testlib",
+    ],
+    data = [
+        "//maga_transformer/test/model_test/fake_test/testdata:testdata",
+        "//maga_transformer/test/tokenizer_test:testdata",
     ],
 )
 
@@ -77,7 +92,7 @@ py_test(
         "server_test.py",
     ],
     data = [
-        "//maga_transformer:sdk"
+        "//maga_transformer:sdk",
     ],
     deps = [
         "//maga_transformer:uvicorn",
@@ -85,6 +100,7 @@ py_test(
         "//maga_transformer:psutil",
         "//maga_transformer:tiktoken",
         "//maga_transformer:testlib",
+        "//deps:extension_lib",
     ],
     imports = ["aios/kmonitor/python_client"],
     tags = ["manual"],
@@ -101,4 +117,17 @@ py_test(
         "//maga_transformer:testlib",
         "//maga_transformer/test/model_test/test_util",
     ]
+)
+
+py_test(
+    name = "concurrency_limit_test",
+    srcs = [
+        "concurrency_limit_test.py"
+    ],
+    deps = [
+        "//maga_transformer:sdk",
+        "//maga_transformer:testlib",
+        "//maga_transformer/test/model_test/test_util",
+    ],
+    timeout = 'short'
 )

@@ -3,6 +3,7 @@ import uuid
 from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Union, Optional, List, Dict, Literal, Any
+from maga_transformer.models.base_model import AuxInfo
 
 class ModelCard(BaseModel):
     id: str
@@ -73,25 +74,38 @@ class GPTFunctionDefinition(BaseModel):
     name_for_human: Optional[str] = None
     description_for_model: Optional[str] = None
 
+class ExtraConfigs(BaseModel):
+    top_k: Optional[int] = None
+    repitition_penalty: Optional[float] = None
+    max_new_tokens: Optional[int] = None
+    timeout_ms: Optional[int] = None
+
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
     functions: Optional[List[GPTFunctionDefinition]] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
-    n: Optional[int] = 1
     max_tokens: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
-    presence_penalty: Optional[float] = 0.0
-    frequency_penalty: Optional[float] = 0.0
-    logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
+    seed: Optional[int] = None
 
-    # These params are hacked for our framework, not standard.
+    # ---- These functions are not implemented yet.
+    # n: Optional[int] = 1
+    # presence_penalty: Optional[float] = 0.0
+    # frequency_penalty: Optional[float] = 0.0
+    # logit_bias: Optional[Dict[str, float]] = None
+
+    # ---- These params are hacked for our framework, not standard.
+    extra_configs: Optional[ExtraConfigs] = None
     private_request: bool = False
     trace_id: Optional[str] = None
     chat_id: Optional[str] = None
+    debug_info: Optional[bool] = False
+    aux_info: Optional[bool] = False
+    extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
 
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
@@ -109,6 +123,24 @@ class FinisheReason(str, Enum):
     length = "length"
     function_call = "function_call"
 
+class RendererInfo(BaseModel):
+    class_name: str
+    renderer_model_type: str
+    extra_stop_word_ids_list: List[List[int]]
+    extra_stop_words_list: List[str]
+    template: Optional[str] = None
+
+class DebugInfo(BaseModel):
+    input_prompt: str
+    input_ids: List[int]
+    input_images: List[str]
+    tokenizer_info: str
+    max_seq_len: int
+    eos_token_id: Optional[int]
+    stop_word_ids_list: List[List[int]]
+    stop_words_list: List[str]
+    renderer_info: RendererInfo
+
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
@@ -121,6 +153,8 @@ class ChatCompletionResponse(BaseModel):
     model: str = ""
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
+    debug_info: Optional[DebugInfo] = None
+    aux_info: Optional[AuxInfo] = None
 
 class DeltaMessage(BaseModel):
     role: Optional[RoleEnum] = None
@@ -140,3 +174,5 @@ class ChatCompletionStreamResponse(BaseModel):
     model: Optional[str] = None
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+    debug_info: Optional[DebugInfo] = None
+    aux_info: Optional[AuxInfo] = None

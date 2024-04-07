@@ -9,10 +9,10 @@ from maga_transformer.models.gpt import GPT
 from maga_transformer.model_factory_register import register_model
 
 class FalconWeightInfo(ModelDeployWeightInfo):
-    def _process_meta(self, meta_dict):
-        if 'transformer.h.0.ln_attn.weight' in meta_dict:
+    def _process_meta(self, meta_dicts, weight_keys):
+        if 'transformer.h.0.ln_attn.weight' in weight_keys:
             self.falcon_40b = True
-        elif 'transformer.h.0.input_layernorm.weight' in meta_dict:
+        elif 'transformer.h.0.input_layernorm.weight' in weight_keys:
             self.falcon_40b = False
 
     def _get_weight_info(self):
@@ -60,8 +60,8 @@ class Falcon(GPT):
     def get_weight_cls():
         return FalconWeightInfo
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_path = os.path.join(ckpt_path, 'config.json')
         with open(config_path) as f:
             config_json = json.load(f)
@@ -83,4 +83,4 @@ class Falcon(GPT):
         config.rotary_embedding_dim = config.size_per_head
         return config
 
-register_model('falcon', Falcon)
+register_model('falcon', Falcon, ["FalconForCausalLM"])
