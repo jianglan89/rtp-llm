@@ -1,128 +1,117 @@
 
-#include "src/fastertransformer/kernels/rotary_position_embedding.h"
+#include "rtp_llm/cpp/kernels/rotary_position_embedding.h"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
-using namespace fastertransformer;
+using namespace rtp_llm;
+
 namespace unittest {
 
-
-template<RotaryEmbeddingStyle style>
-__global__ void KernelWrapper(
-    at::PackedTensorAccessor32<float,4,at::RestrictPtrTraits> input,
-    const int dim, const int base, const float scalar,
-    int max_position_embeddings,
-    int max_logn_seq_len) {
-
+using _4DTensor = at::PackedTensorAccessor32<float, 4, at::RestrictPtrTraits>;
+__global__ void
+KernelWrapper(_4DTensor input, RopeStyle style, int dim, int base, float scale, int max_pos, float mscale, int offset) {
     extern __shared__ __align__(sizeof(float2)) char smem[];  // align on largest vector type
-    const int batch_idx = blockIdx.x / input.size(1);
-    const int seq_idx = blockIdx.x % input.size(1);
-    const int headnum_idx = blockIdx.y;
-    const int headsize_idx = threadIdx.x;
-    const bool work = (batch_idx < input.size(0)) && (seq_idx < input.size(1)) &&
-                           (headnum_idx < input.size(2)) && (headsize_idx * 2 < input.size(3));
+    const int                                        batch_idx    = blockIdx.x / input.size(1);
+    const int                                        seq_idx      = blockIdx.x % input.size(1);
+    const int                                        headnum_idx  = blockIdx.y;
+    const int                                        headsize_idx = threadIdx.x;
+    const bool work = (batch_idx < input.size(0)) && (seq_idx < input.size(1)) && (headnum_idx < input.size(2))
+                      && (headsize_idx * 2 < input.size(3));
 
+    RopeConfig rope_config;
+    rope_config.style   = style;
+    rope_config.dim     = dim;
+    rope_config.base    = base;
+    rope_config.scale   = scale;
+    rope_config.max_pos = max_pos;
+    rope_config.mscale  = mscale;
+    rope_config.offset  = offset;
+
+    if (style == RopeStyle::Yarn) {
+        rope_config.factor1 = 1;
+        rope_config.factor2 = 32;
+    } else if (style == RopeStyle::Llama3) {
+        rope_config.factor1 = 1;
+        rope_config.factor2 = 4;
+    }
     if (work) {
         float2 x;
         x = *reinterpret_cast<float2*>(&input[batch_idx][seq_idx][headnum_idx][headsize_idx * 2]);
-        if constexpr (style == RotaryEmbeddingStyle::GLM) {
-            fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, seq_idx, dim, base);
-        } else if constexpr (style == RotaryEmbeddingStyle::Base) {
-            fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, dim, base);
-        } else if constexpr (style == RotaryEmbeddingStyle::LinearScalar) {
-            fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, dim, base, scalar);
-        } else if constexpr (style == RotaryEmbeddingStyle::NTKScalar) {
-            fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, dim, base, scalar, 
-                                                        input.size(1), max_position_embeddings);
-        } else if constexpr (style == RotaryEmbeddingStyle::QWenNTKScalar) {
-            fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, dim, base, scalar, 
-                                                        input.size(1), max_logn_seq_len);
-        }
-        
+        FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+            apply_rope<float, float2, ROPE_STYLE>(rope_config, x, (float*)smem, headsize_idx, seq_idx, input.size(1));
+        });
         *reinterpret_cast<float2*>(&input[batch_idx][seq_idx][headnum_idx][headsize_idx * 2]) = x;
-
     }
 }
 
 class RotaryPositionEmbeddingOp: public torch::jit::CustomClassHolder {
 public:
-    RotaryPositionEmbeddingOp(int64_t dim, int64_t max_position_embeddings,
-                              int64_t base, double scalar, int64_t max_logn_seq_len,
-                              int64_t style):
-        dim(dim),max_position_embeddings(max_position_embeddings),
-        base(base),scalar(scalar),style(style),
-        max_logn_seq_len(max_logn_seq_len) {};
+    RotaryPositionEmbeddingOp(int64_t dim, int64_t max_pos, int64_t base, double scale, int64_t style, double mscale):
+        dim(dim), max_pos(max_pos), base(base), scale(scale), style(style), mscale(mscale) {}
 
-    torch::Tensor forward(torch::Tensor input);
+    torch::Tensor forward(torch::Tensor input, int64_t offset);
 
 private:
     int64_t dim;
     int64_t base;
-    double scalar = 1.0;
-    int64_t max_position_embeddings = 2048;
-    int64_t style = 0;
-    int64_t max_logn_seq_len = 2048;
+    double  scale   = 1.0;
+    int64_t max_pos = 2048;
+    int64_t style   = 0;
+    double  mscale  = 1.0;
 };
 
-torch::Tensor RotaryPositionEmbeddingOp::forward(torch::Tensor input) {
+torch::Tensor RotaryPositionEmbeddingOp::forward(torch::Tensor input, int64_t offset) {
     auto stream = at::cuda::getCurrentCUDAStream().stream();
-    dim3   block((input.size(3) + 31) / 32 * 32);
-    dim3   grid(input.size(0) * input.size(1), input.size(2));
+    dim3 block((input.size(3) + 31) / 32 * 32);
+    dim3 grid(input.size(0) * input.size(1), input.size(2));
 
-    size_t smem_size = dim * sizeof(float);
+    size_t smem_size = 2 * dim * sizeof(float);
+    auto   data_type = torchDTypeToDataType(input.dtype());
 
-    cudaEvent_t start, stop;
-    float elapsedTime;
+    RopeConfig rope_config;
+    rope_config.style   = RopeStyle(style);
+    rope_config.dim     = dim;
+    rope_config.base    = base;
+    rope_config.scale   = scale;
+    rope_config.max_pos = max_pos;
+    rope_config.mscale  = mscale;
+    rope_config.offset  = offset;
 
-    cudaEventCreate(&start);
-    cudaEventRecord(start,0);
+    int seq_len   = input.size(1);
+    int head_num  = input.size(2);
+    int head_size = input.size(3);
 
-    switch (style)
-    {
-    case 0:
-        KernelWrapper<RotaryEmbeddingStyle::Base><<<grid, block, smem_size, stream>>>(
-            input.packed_accessor32<float,4,at::RestrictPtrTraits>(), 
-            dim, base, scalar, max_position_embeddings, max_logn_seq_len);
-        break;
-    
-    case 1:
-        KernelWrapper<RotaryEmbeddingStyle::LinearScalar><<<grid, block, smem_size, stream>>>(
-            input.packed_accessor32<float,4,at::RestrictPtrTraits>(), 
-            dim, base, scalar, max_position_embeddings, max_logn_seq_len);
-        break;
-    
-    case 2:
-        KernelWrapper<RotaryEmbeddingStyle::NTKScalar><<<grid, block, smem_size, stream>>>(
-            input.packed_accessor32<float,4,at::RestrictPtrTraits>(), 
-            dim, base, scalar, max_position_embeddings, max_logn_seq_len);
-        break;
-    
-    case 3:
-        KernelWrapper<RotaryEmbeddingStyle::QWenNTKScalar><<<grid, block, smem_size, stream>>>(
-            input.packed_accessor32<float,4,at::RestrictPtrTraits>(), 
-            dim, base, scalar, max_position_embeddings, max_logn_seq_len);
-        break;
-    
-    case 4:
-        KernelWrapper<RotaryEmbeddingStyle::GLM><<<grid, block, smem_size, stream>>>(
-            input.packed_accessor32<float,4,at::RestrictPtrTraits>(), 
-            dim, base, scalar, max_position_embeddings, max_logn_seq_len);
-        break;
-
-    default:
-        break;
+    if (rope_config.style == RopeStyle::Yarn) {
+        rope_config.factor1 = 1;
+        rope_config.factor2 = 32;
+    } else if (rope_config.style == RopeStyle::Llama3) {
+        rope_config.factor1 = 1;
+        rope_config.factor2 = 4;
     }
 
-    cudaEventCreate(&stop);
-    cudaEventRecord(stop,0);
-    cudaEventSynchronize(stop);
+    switch (data_type) {
+        case TYPE_FP16:
+            launchApplyRopeKernel<half, uint32_t><<<grid, block, smem_size, stream>>>(
+                (half*)input.data_ptr(), rope_config, head_num, head_size, seq_len, nullptr, nullptr);
+            break;
+        case TYPE_BF16:
+            launchApplyRopeKernel<__nv_bfloat16, __nv_bfloat162><<<grid, block, smem_size, stream>>>(
+                (__nv_bfloat16*)input.data_ptr(), rope_config, head_num, head_size, seq_len, nullptr, nullptr);
+            break;
+        case TYPE_FP32:
+            launchApplyRopeKernel<float, float2><<<grid, block, smem_size, stream>>>(
+                (float*)input.data_ptr(), rope_config, head_num, head_size, seq_len, nullptr, nullptr);
+            break;
+        default:
+            throw std::runtime_error("Unsupported data type");
+    }
 
-    cudaEventElapsedTime(&elapsedTime, start,stop);
-    printf("Input shape : [%d, %d, %d, %d]\n" ,input.size(0), input.size(1), input.size(2), input.size(3));
-    printf("Elapsed time : %f ms\n" ,elapsedTime);
+    // KernelWrapper<<<grid, block, smem_size, stream>>>(
+    //         input.packed_accessor32<float, 4 ,at::RestrictPtrTraits>(),
+    //         RopeStyle(style), dim, base, scale, max_pos, mscale, offset);
 
-    
     torch::Tensor output = input.detach().clone();
     return output;
 }
@@ -131,5 +120,5 @@ torch::Tensor RotaryPositionEmbeddingOp::forward(torch::Tensor input) {
 
 static auto RotaryPositionEmbeddingTHS =
     torch::jit::class_<unittest::RotaryPositionEmbeddingOp>("unittest", "RotaryPositionEmbeddingOp")
-        .def(torch::jit::init<int64_t, int64_t, int64_t, double, int64_t, int64_t>())
+        .def(torch::jit::init<int64_t, int64_t, int64_t, double, int64_t, double>())
         .def("forward", &unittest::RotaryPositionEmbeddingOp::forward);

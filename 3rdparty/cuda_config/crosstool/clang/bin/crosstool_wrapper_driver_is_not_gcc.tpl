@@ -180,6 +180,8 @@ def InvokeNvcc(argv, log=False):
   host_compiler_options = GetHostCompilerOptions(argv)
   nvcc_compiler_options = GetNvccOptions(argv)
   opt_option = GetOptionValue(argv, '-O')
+  llvm_options_value = GetOptionValue(argv, '-mllvm')
+  llvm_options = ''.join([' -mllvm ' + llvm_option for llvm_option in llvm_options_value])
   m_options = GetOptionValue(argv, '-m')
   m_options = ''.join([' -m' + m for m in m_options if m in ['32', '64']])
   include_options = GetOptionValue(argv, '-I')
@@ -200,7 +202,9 @@ def InvokeNvcc(argv, log=False):
   # The list of source files get passed after the -c option. I don't know of
   # any other reliable way to just get the list of source files to be compiled.
   src_files = GetOptionValue(argv, '-c')
-
+  mcmodel_options = ''.join([' -mcmodel=' + x for x in GetOptionValue(argv, '-mcmodel')])
+  if mcmodel_options:
+    mcmodel_options = ' -Xcompiler ' + mcmodel_options
   # Pass -w through from host to nvcc, but don't do anything fancier with
   # warnings-related flags, since they're not necessarily the same across
   # compilers.
@@ -211,12 +215,7 @@ def InvokeNvcc(argv, log=False):
   if len(out_file) != 1:
     return 1
 
-  if "TF_KERNEL_O3=1" in defines_value:
-    opt = (' -O3' if (len(opt_option) > 0 and int(opt_option[0]) > 0)
-         else ' -g')
-  else:
-    opt = (' -O2' if (len(opt_option) > 0 and int(opt_option[0]) > 0)
-        else ' -g')
+  opt = ' -O' + opt_option[-1] + ' '
 
   includes = (' -I ' + ' -I '.join(include_options)
               if len(include_options) > 0
@@ -245,6 +244,8 @@ def InvokeNvcc(argv, log=False):
   nvccopts += m_options
   nvccopts += warning_options
   nvccopts += fatbin_options
+  nvccopts += mcmodel_options
+  nvccopts += llvm_options
 
   if depfiles:
     # Generate the dependency file

@@ -5,9 +5,10 @@ cc_library(
         "include/**/*.h",
         "include/**/*.cuh",
         "include/**/*.hpp",
+        "include/**/*.inl",
     ]),
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     strip_include_prefix = "include",
@@ -17,16 +18,25 @@ cc_library(
 cc_library(
     name = "cutlass_utils",
     hdrs = glob([
-        "tools/util/include/cutlass/util/*.h",
-        "tools/util/include/cutlass/util/*.hpp",
-        "tools/util/include/cutlass/util/*.cuh"
+        "tools/util/include/**/*.h",
+        "tools/util/include/**/*.hpp",
+        "tools/util/include/**/*.cuh"
     ]),
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     strip_include_prefix = "tools/util/include/",
     visibility = ["//visibility:public"],
 )
 
-
+filegroup(
+    name = "cutlass_origin",
+    srcs = glob([
+        "include/**/*.h",
+        "include/**/*.cuh",
+        "include/**/*.hpp",
+        "include/**/*.inl"
+    ]),
+    visibility = ["//visibility:public"],
+)

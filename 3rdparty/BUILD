@@ -1,29 +1,19 @@
-load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts",)
+load("//:def.bzl", "rpm_library", "copts", "cuda_copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
-    name = "ini_reader",
-    hdrs = [
-        "INIReader.h",
-    ],
-    copts = copts(),
-    visibility = ["//src:__subpackages__"],
-)
-
-cc_library(
     name = "cuda_driver",
-    srcs = glob([
-        "common/*.cpp",
-    ]),
     hdrs = glob([
         "common/*.h",
-    ]),    
+    ]),
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
+        "@local_config_cuda//cuda:cuda_driver",
     ],
-    copts = cuda_copts(),
-    visibility = ["//:__subpackages__"],
+    copts = copts(),
+    visibility = ["//visibility:public"],  
 )
 
 cc_library(
@@ -37,9 +27,9 @@ cc_library(
         "cub/**/*.cu",
     ]),
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
-    visibility = ["//src:__subpackages__"],
+    visibility = ["//visibility:public"],
 )

@@ -1,114 +1,9 @@
-load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
-load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
-
-cutlass_kernels_interface()
-################################ cpp test ################################
-
-test_copts = [
-    "-fno-access-control",
-] + cuda_copts() + copts()
-
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    "-ltorch_cpu",
-    "-ltorch_python",
-    "-L/usr/local/cuda/lib64",
-    "-lcudart",
-    "-lcuda",
-    "-lnccl",
-    "-lnvToolsExt",
-]
-
-cc_library(
-    name = "test_lib",
-    hdrs = ["unittests/unittest_utils.h", "unittests/gtest_utils.h"],
-    deps = torch_deps() + [
-        "//src/fastertransformer/cuda:allocator_cuda",
-        "cutlass_kernels_interface",
-        "//src/fastertransformer/kernels:kernels",
-        "//src/fastertransformer/utils:utils",
-        "//src/fastertransformer/cuda:cuda",
-        "//src/fastertransformer/layers:layers",
-        "//src/fastertransformer/models:models",
-        "//3rdparty/flash_attention2:flash_attention2_impl",
-        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-        "@com_google_googletest//:gtest",
-    ],
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-)
-
-cc_test(
-    name = "test_activation",
-    srcs = ["unittests/test_activation.cu"],
-    deps = [":test_lib"],
-    copts = test_copts,
-    linkopts = test_linkopts,
-    visibility = ["//visibility:public"],
-)
-
-cc_test(
-    name = "test_attention_kernels",
-    srcs = ["unittests/test_attention_kernels.cu"],
-    deps = [":test_lib"],
-    copts = test_copts,
-    linkopts = test_linkopts,
-    visibility = ["//visibility:public"],
-    tags = ["exclusive"]
-)
-
-# cc_test(
-#     name = "test_context_decoder_layer",
-#     srcs = ["unittests/test_context_decoder_layer.cu"],
-#     deps = [":test_lib"],
-#     copts = test_copts,
-#     linkopts = test_linkopts,
-#     visibility = ["//visibility:public"],
-# )
-
-cc_test(
-    name = "test_gemm",
-    srcs = ["unittests/test_gemm.cu"],
-    deps = [":test_lib"],
-    copts = test_copts,
-    linkopts = test_linkopts,
-    visibility = ["//visibility:public"],
-)
-
-cc_test(
-    name = "test_gpt_kernels",
-    srcs = ["unittests/test_gpt_kernels.cu"],
-    deps = [":test_lib"],
-    copts = test_copts,
-    linkopts = test_linkopts,
-    visibility = ["//visibility:public"],
-)
-
-cc_test(
-    name = "test_int8",
-    srcs = ["unittests/test_int8.cu", "unittests/test_logprob_kernels.cu",
-            "unittests/test_penalty_kernels.cu",
-            "unittests/test_tensor.cu"],
-    deps = [":test_lib"],
-    copts = test_copts,
-    linkopts = test_linkopts,
-    visibility = ["//visibility:public"],
-)
-
-# TODO(xinfei.sxf) fix those case, assert failed
-# cc_test(
-#     name = "test_sample",
-#     srcs = ["unittests/test_sampling.cu", "unittests/test_sampling_layer.cu",
-#             "unittests/test_sampling_kernels.cu"],
-#     deps = [":test_lib"],
-#     copts = test_copts,
-#     linkopts = test_linkopts,
-#     visibility = ["//visibility:public"],
-# )
+load("//:def.bzl", "copts", "cuda_copts", "rocm_copts")
+load("//bazel:arch_select.bzl", "torch_deps", "fa_deps", "cuda_register")
 
 ################################ py test ################################
+fa_deps()
+cuda_register()
 
 cc_library(
     name = "test_ops_libs",
@@ -116,21 +11,36 @@ cc_library(
         "layernorm/*.cpp",
         "rotary_embedding/*.cpp",
         "attention_logn/*.cpp",
-        "gemm_dequantize/*.cc",
         "gemm_group/*.cc",
+        "gemm/*.cc",
+        "mla/*.cc",
         "unittests/test_activation.cu",
-        # "moe/*.cc"
-    ]),
-    hdrs = glob([
-        "unittests/unittest_utils.h",
-    ]),
+    ]) + select({
+        "@//:using_cuda12": glob([
+            "fp8_gemm/*.cc",
+            "gemm_dequantize/*.cc",
+            "int8_gemm/*.cc",
+        ]),
+        "//conditions:default": [],
+    }) + [":fa"],
     deps = torch_deps() + [
-        "//src/fastertransformer/kernels:kernels",
-	    "//:th_utils",
-        "cutlass_kernels_interface",
+        ":fa_hdrs",
+        "//rtp_llm/cpp/cuda:allocator_torch",
+        "//rtp_llm/cpp/cuda:cuda",
+        "//rtp_llm/cpp/cuda:memory_utils",
+        "//rtp_llm/cpp/cuda:quantize_utils",
+        "//rtp_llm/cpp/kernels:kernels_cu",
+        "//rtp_llm/cpp/kernels:scaled_fp8_quant",
+        "//rtp_llm/cpp/pybind:th_utils",
+        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/config:gpt_init_params",
     ],
     copts = cuda_copts(),
     alwayslink = True,
+    linkopts = [
+        "-Wl,-rpath='$$ORIGIN'",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 cc_binary(
@@ -150,24 +60,44 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
-    name = "rotary_position_embedding",
+    name = "generalLayerNorm",
     srcs = [
-        "rotary_embedding/rotary_position_embedding.py"
+        "layernorm/generalLayerNorm.py"
     ],
     data = [
         "//:th_transformer",
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
-        "//maga_transformer:einops"
+        "//rtp_llm:torch",
     ],
-    tags = ["exclusive"]
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "rotary_position_embedding",
+    srcs = [
+        "rotary_embedding/rotary_position_embedding.py",
+        "rotary_embedding/yarn_rotary_embedding.py",
+        "rotary_embedding/deepseek_yarn_rotary_embedding.py",
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+        "//rtp_llm:einops"
+    ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -180,8 +110,59 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
+        "//rtp_llm:torch",
     ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "th_int8_gemm",
+    srcs = [
+        "int8_gemm/th_int8_gemm.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops"
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:numpy",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "gemm_op_test",
+    srcs = [
+        "gemm/gemm_op_test.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:numpy",
+    ],
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
+    name = "th_fp8_gemm",
+    srcs = [
+        "fp8_gemm/th_fp8_gemm.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:numpy",
+    ],
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -194,49 +175,302 @@ py_test(
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
+        "//rtp_llm:torch",
+        "//rtp_llm:numpy",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
-    name = "test_th_decode_op",
+    name = "merge_transpose_test",
     srcs = [
-        "unittests/th_op/test_th_decode_op.py"
+        "mla/merge_transpose_test.py"
     ],
     data = [
         "//:th_transformer",
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
+        "//rtp_llm:torch",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
-    name = "th_gemm_group",
+    name = "mla_context_attention",
     srcs = [
-        "gemm_group/th_gemm_group.py"
+        "mla/mla_context_attention.py",
+        "mla/test_util.py"
     ],
     data = [
         "//:th_transformer",
         ":test_ops",
     ],
     deps = [
-        "//maga_transformer:torch",
+        "//rtp_llm:torch",
+        "//rtp_llm:flash_attn",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+
+
+py_test(
+    name = "mla_decode_attention",
+    srcs = [
+        "mla/mla_decode_attention.py",
+        "mla/test_util.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_library(
+    name = "rocm_test_ops_libs",
+    srcs = glob([
+        "mla/mla_rotary_kvcache_test.cc",
+        "mla/mla_decoder_attention.cc",
+        "mla/mla_context_attention.cc",
+        "gemm/gemm_op_test.cc",
+        "ffn/rocm_ffn_moe_fp8_test.cc",
+        "ffn/rocm_ffn_moe_bf16_test.cc",
+    ]),
+    deps = torch_deps() + [
+        "//rtp_llm/cpp/devices/rocm_impl:rocm_impl",
+    ],
+    copts = rocm_copts(),
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+	  tags = ["rocm"],
+)
+
+cc_binary(
+    name = "rocm_test_ops",
+    deps = [":rocm_test_ops_libs"],
+    linkshared = 1,
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+py_test(
+    name = "rocm_gemm_op_test",
+    srcs = [
+        "gemm/rocm_gemm_op_test.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "128000000",
+    },
+    tags = [
+        "rocm",
     ],
 )
 
-# py_test(
-#     name = "th_moe",
-#     srcs = [
-#         "moe/th_moe.py"
-#     ],
-#     data = [
-#         "//:th_transformer",
-#         ":test_ops",
-#     ],
-#     deps = [
-#         "//maga_transformer:torch",
-#     ],
-#     timeout = "long"
-# )
+py_test(
+    name = "rocm_ptpc_gemm_op_test",
+    srcs = [
+        "gemm/rocm_ptpc_gemm_op_test.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    tags = [
+        "rocm",
+    ],
+)
+
+py_test(
+    name = "rocm_mla_decode_attention",
+    srcs = [
+        "mla/rocm_mla_decode_attention.py",
+        "mla/test_util.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    tags = [
+        "rocm",
+    ],
+)
+
+#ToDo: fix aiter import issue
+#py_test(
+#    name = "rocm_ffn_moe_fp8_test",
+#    srcs = [
+#        "ffn/rocm_ffn_moe_fp8_test.py"
+#    ],
+#    data = [
+#        "//:th_transformer",
+#        ":rocm_test_ops",
+#    ],
+#    deps = [
+#        "//rtp_llm:torch",
+#        "//rtp_llm:rtp_llm_lib",
+#        "@aiter//:aiter_py",
+#    ],
+#    env = {
+#        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+#    },
+#    tags = [
+#        "rocm",
+#    ],
+#)
+
+#ToDo: fix aiter import issue
+#py_test(
+#    name = "rocm_ffn_moe_bf16_test",
+#    srcs = [
+#        "ffn/rocm_ffn_moe_bf16_test.py"
+#    ],
+#    data = [
+#        "//:th_transformer",
+#        ":rocm_test_ops",
+#    ],
+#    deps = [
+#        "//rtp_llm:torch",
+#        "//rtp_llm:rtp_llm_lib",
+#        "@aiter//:aiter_py",
+#    ],
+#    env = {
+#        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+#    },
+#    tags = ["rocm"],
+#)
+
+py_test(
+    name = "mla_rotary_kvcache_test",
+    srcs = [
+        "mla/mla_rotary_kvcache_test.py",
+        "mla/test_util.py",
+        "mla/rotary_util.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+
+py_test(
+    name = "bench_mla_attention_layer",
+    srcs = [
+        "mla/bench_mla_attention_layer.py",
+        "mla/test_util.py"
+    ],
+    data = [
+        ":test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    tags = [
+        "manual",
+    ],
+)
+
+py_test(
+    name = "rocm_mla_context_attention",
+    srcs = [
+        "mla/rocm_mla_context_attention.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+   deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    tags = [
+        "manual",
+		"rocm",
+    ],
+)
+
+py_test(
+    name = "rocm_mla_rotary_kvcache_test",
+    srcs = [
+        "mla/rocm_mla_rotary_kvcache_test.py",
+        "mla/test_util.py",
+        "mla/rotary_util.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    tags = [
+        "rocm",
+    ],
+)
+
+cc_test(
+    name = "eplb_kernel_test",
+    srcs = [
+        "eplb/eplb_kernel_test.cc",
+    ],
+    copts = cuda_copts(),
+    deps = [
+        "@com_google_googletest//:gtest",
+        "//rtp_llm/cpp/kernels:kernels_cu",
+        "@local_config_cuda//cuda:cuda_driver",
+    ] + torch_deps(),
+    data = [
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "fused_qk_rmsnorm",
+    srcs = [
+        "layernorm/fused_qk_rmsnorm.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)

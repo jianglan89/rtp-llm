@@ -44,8 +44,32 @@ def cuda_default_copts():
         "-x", "cuda",
         "-DGOOGLE_CUDA=1",
         "-Xcuda-fatbinary=--compress-all",
-        "--no-cuda-include-ptx=all"
+        "--no-cuda-include-ptx=all",
+        "-nvcc_options=relaxed-constexpr",
+        "-nvcc_options=ftz=true",
+        "-nvcc_options=generate-line-info",
+        "-nvcc_options=threads=8",
+        "-nvcc_options=Wno-deprecated-declarations",
+        "-nvcc_options=diag-suppress=68",
     ] + %{cuda_extra_copts}) + if_cuda_clang_opt(
+        # Some important CUDA optimizations are only enabled at O3.
+        ["-O3"]
+    )
+
+def cuda_default_copts_without_arch():
+    """Default options for all CUDA compilations."""
+    return if_cuda([
+        "-x", "cuda",
+        "-DGOOGLE_CUDA=1",
+        "-Xcuda-fatbinary=--compress-all",
+        "--no-cuda-include-ptx=all",
+        "-nvcc_options=relaxed-constexpr",
+        "-nvcc_options=ftz=true",
+        "-nvcc_options=generate-line-info",
+        "-nvcc_options=threads=8",
+        "-nvcc_options=Wno-deprecated-declarations",
+        "-nvcc_options=diag-suppress=68",
+    ]) + if_cuda_clang_opt(
         # Some important CUDA optimizations are only enabled at O3.
         ["-O3"]
     )
@@ -88,12 +112,14 @@ def cuda_header_library(
         strip_include_prefix = strip_include_prefix,
         deps = deps,
         visibility = ["//visibility:private"],
+        tags = ["no-remote"],
     )
 
     native.cc_library(
         name = name,
         textual_hdrs = hdrs,
         deps = deps + [":%s_virtual" % name],
+        tags = ["no-remote"],
         **kwargs
     )
 

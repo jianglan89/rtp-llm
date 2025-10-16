@@ -28,7 +28,10 @@
 #include <cuda_runtime.h>
 
 #include "fused_multihead_attention_common.h"
+#include "fused_multihead_attention_v2.h"
 #include "tmaDescriptor.h"
+
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 
 namespace tensorrt_llm
 {
@@ -37,82 +40,66 @@ namespace kernels
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-class MHARunner
-{
-public:
-    MHARunner(const Data_type dataType, const int numHeads, const int headSize, const float qScaling);
-
-    MHARunner() = default;
-
-    virtual ~MHARunner() = default;
-
-    virtual void setup(const int b, const int s, const int sliding_window_size, const int total_seqlen,
-        const bool has_alibi = false, const bool scale_alibi = false, const int tp_size = 1, const int tp_rank = 0)
-        = 0;
-
-    virtual void setup_paged_kv(const int b, const int s_q, const int s_kv, const int blocks_per_context_sequence,
-        const int tokens_per_kv_block, const int sliding_window_size, const int total_seqlen,
-        const bool has_alibi = false, const bool scale_alibi = false, const int tp_size = 1, const int tp_rank = 0)
-        = 0;
-
-    static bool fmha_supported(const int headSize, const int sm);
-
-    virtual bool fmha_supported() = 0;
-
-    virtual void setup_flags(const bool force_fp32_acc, const bool is_s_padded, const bool causal_mask,
-        const int num_kv_heads /* MQA or GQA */)
-        = 0;
-
-    virtual void run(const void* input, const void* cu_seqlens, void* output, cudaStream_t stream) = 0;
-
-    virtual void run_paged_kv(const void* q_input, void* paged_kv_tma_desc, const void* paged_kv_block_ptrs_on_host,
-        const fastertransformer::KVBlockArray paged_kv_cache, const void* cu_q_seqlens, const void* cu_kv_seqlens, void* output,
-        cudaStream_t stream)
-        = 0;
-
-    virtual bool isValid(int s) const = 0;
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
 // Workflow of fmha runner:
 // 1. check if FMHA kernels are supported statically.
-// 2. construct FMHA runner object.
-// 3. setup_flags (used by all kernels).
-// 4. setup runtime parameters (used by this specific case).
-// 5. run the kernel (with all needed device pointers).
-
-class FusedMHARunnerV2 : public MHARunner
+// 2. construct FMHA runner object with the fixed params.
+// 3. run the kernel (with all needed device pointers).
+class FusedMHARunnerV2
 {
 public:
-    FusedMHARunnerV2(const Data_type dataType, const int numHeads, const int headSize, const float qScaling);
+    // Constructor.
+    FusedMHARunnerV2(MHARunnerFixedParams fixedParams);
 
-    ~FusedMHARunnerV2(); // for pimpl
+    // Deconstructor.
+    ~FusedMHARunnerV2() = default; // for pimpl
 
-    void setup(const int b, const int s, const int sliding_window_size, const int total_seqlen,
-        const bool has_alibi = false, const bool scale_alibi = false, const int tp_size = 1,
-        const int tp_rank = 0) override;
+    // Check if any fmha kernel meets the requirements.
+    bool isFmhaSupported();
 
-    void setup_paged_kv(const int b, const int s_q, const int s_kv, const int blocks_per_context_sequence,
-        const int tokens_per_kv_block, const int sliding_window_size, const int total_seqlen,
-        const bool has_alibi = false, const bool scale_alibi = false, const int tp_size = 1,
-        const int tp_rank = 0) override;
+    // Does FMHA need a separate Q and Kv input ?
+    bool isSeparateQAndKvInput() const
+    {
+        return mFixedParams.attentionInputLayout != AttentionInputLayout::PACKED_QKV;
+    }
 
-    bool fmha_supported() override;
-
-    void run(const void* input, const void* cu_seqlens, void* output, cudaStream_t stream) override;
-    void run_paged_kv(const void* q_input, void* paged_kv_tma_desc, const void* paged_kv_block_ptrs_on_host,
-        const fastertransformer::KVBlockArray paged_kv_cache, const void* cu_q_seqlens, const void* cu_kv_seqlens, void* output,
-        cudaStream_t stream) override;
-
-    void setup_flags(const bool force_fp32_acc, const bool is_s_padded, const bool causal_mask,
-        const int num_kv_heads /* MQA or GQA */) override;
-
-    bool isValid(int s) const override;
+    // Run the fmha kernel.
+    void run(MHARunnerParams runnerParams);
 
 private:
-    class mhaImpl;
-    std::unique_ptr<mhaImpl> pimpl;
+    // Set the kernel params.
+    void setupKernelParams(MHARunnerParams runnerParams);
+
+    // Set the launch params to select kernels.
+    void setupLaunchParams(MHARunnerParams runnerParams);
+
+    // Set the tma descriptors.
+    void setTmaDescriptors(MHARunnerParams runnerParams);
+
+    // Check if it is a valid sequence length (only used by non-flash-attention kernels).
+    bool isValidS(int s) const;
+
+    // Get the kernel sequence that support the max sequence length (only used by non-flash-attention kernels).
+    int getSFromMaxSeqLen(int const max_seq_len) const;
+
+private:
+    // The attention fixed params (mostly related to the attention structure).
+    MHARunnerFixedParams mFixedParams;
+    // The attention input params (runtime-known parameters).
+    MHARunnerParams mRunnerParams;
+    // The launch params to select the specific fmha kernel.
+    Launch_params mLaunchParams;
+    // The kernel params.
+    Fused_multihead_attention_params_v2 mKernelParams;
+    // The SM version.
+    int mSM = rtp_llm::get_sm();
+    // The multiple processor count.
+    int mMultiProcessorCount;
+    // The L2 cache size.
+    int mDeviceL2CacheSize;
+    // The total device memory.
+    size_t mTotalDeviceMemory;
+    // The class that stores all the kernels.
+    FusedMultiHeadAttentionXMMAKernelV2 const* xmmaKernel;
 };
 
 } // namespace kernels

@@ -1,5 +1,5 @@
 {
-    "include": ["maga_transformer"],
+    "include": ["rtp_llm"],
     "exclude": [
         "bazel-*",
         "**/node_modules",
@@ -11,7 +11,7 @@
         "docker",
         "tests",
         "build",
-        "templates",       
+        "templates",
         "cmake"
     ],
     "defineConstant": {

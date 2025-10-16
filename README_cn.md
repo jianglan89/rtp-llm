@@ -15,7 +15,7 @@
 
 ### 高性能
 * 使用高性能的 CUDA kernel, 包括 PagedAttention、FlashAttention、FlashDecoding 等
-* WeightOnly INT8 量化，加载时自动量化
+* WeightOnly INT8 量化，加载时自动量化; WeightOnly INT4量化，支持[GPTQ](https://github.com/AutoGPTQ/AutoGPTQ)/[AWQ](https://github.com/casper-hansen/AutoAWQ)
 * 自适应 KVCache 量化
 * 框架上对动态凑批的 overhead 进行了细致优化
 * 对 V100 进行了特别优化
@@ -32,7 +32,6 @@
 * 多轮对话上下文 Prefix Cache
 * System Prompt Cache
 * Speculative Decoding
-* Medusa
 
 ## 使用方法
 ### 需求
@@ -53,7 +52,7 @@ sh CONTAINER_NAME/sshme.sh
 
 cd ../
 # start http service
-TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m maga_transformer.start_server
+TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m rtp_llm.start_server
 # request to server
 curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 
@@ -65,11 +64,11 @@ cd rtp-llm
 # For cuda12 environment, please use requirements_torch_gpu_cuda12.txt
 pip3 install -r ./open_source/deps/requirements_torch_gpu.txt
 # Use the corresponding whl from the release version, here's an example for the cuda11 version 0.1.0, for the cuda12 whl package please check the release page.
-pip3 install maga_transformer-0.1.9+cuda118-cp310-cp310-manylinux1_x86_64.whl
+pip3 install rtp_llm-0.1.9+cuda118-cp310-cp310-manylinux1_x86_64.whl
 # start http service
 
 cd ../
-TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m maga_transformer.start_server
+TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m rtp_llm.start_server
 # request to server
 curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 ```
@@ -78,14 +77,14 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 
 ### 常见问题
 1. libcufft.so
-    
+
     **Error log**: `OSError: libcufft.so.11: cannot open shared object file: No such file or directory`
 
     **Resolution**: 检查cuda和rtp-llm版本是否匹配
 
 2. libth_transformer.so
 
-    **Error log**: `OSError: /rtp-llm/maga_transformer/libs/libth_transformer.so: cannot open shared object file: No such file or directory`
+    **Error log**: `OSError: /rtp-llm/rtp_llm/libs/libth_transformer.so: cannot open shared object file: No such file or directory`
 
     **Resolution**: 如果是通过whl或者开发镜像安装，测试时请不要在rtp-llm目录下，否则python会用相对路径下的rtp-llm包而非安装好的
 
@@ -109,16 +108,19 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [LoRA](docs/LoRA-Tutorial.md)
 * [PTuning](docs/PTuning-Tutorial.md)
 * [SystemPrompt](docs/SystemPrompt-Tutorial.md)
+* [Embedding/Reranker模型部署](docs/Embedding.md)
 * [多轮会话](docs/ReuseKVCache-Tutorial.md)
 * [多模态](docs/Multimodal-Tutorial.md)
 * [结构化剪枝](docs/Sparse-Tutorial.md)
+* [量化](docs/Quantization.md)
 * [投机采样](docs/SpeculativeDecoding-Tutroial.md)
+* [多进程前端Server模式](docs/MultiFrontendServer.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)
 * [Benchmark&Performance](benchmark/README.md)
 
 ## 致谢
-我们的项目主要基于[FasterTransformer](https://github.com/NVIDIA/FasterTransformer)，并在此基础上集成了[TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)的部分kernel实现。FasterTransformer和TensorRT-LLM为我们提供了可靠的性能保障。[Flash-Attention2](https://github.com/Dao-AILab/flash-attention)和[cutlass](https://github.com/NVIDIA/cutlass)也在我们持续的性能优化过程中提供了大量帮助。我们的continuous batching和increment decoding参考了[vllm](https://github.com/vllm-project/vllm)的实现；采样参考了[transformers](https://github.com/huggingface/transformers)，投机采样部分集成了[Medusa](https://github.com/FasterDecoding/Medusa)的实现，多模态部分集成了[llava](https://github.com/haotian-liu/LLaVA)和[qwen-vl](https://github.com/QwenLM/Qwen-VL)的实现。感谢这些项目对我们的启发和帮助。
+我们的项目主要基于[FasterTransformer](https://github.com/NVIDIA/FasterTransformer)，并在此基础上集成了[TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)的部分kernel实现。FasterTransformer和TensorRT-LLM为我们提供了可靠的性能保障。[Flash-Attention2](https://github.com/Dao-AILab/flash-attention)和[cutlass](https://github.com/NVIDIA/cutlass)也在我们持续的性能优化过程中提供了大量帮助。我们的continuous batching和increment decoding参考了[vllm](https://github.com/vllm-project/vllm)的实现；采样参考了[transformers](https://github.com/huggingface/transformers)，多模态部分集成了[llava](https://github.com/haotian-liu/LLaVA)和[qwen-vl](https://github.com/QwenLM/Qwen-VL)的实现。感谢这些项目对我们的启发和帮助。
 
 ## 支持模型列表
 

@@ -17,7 +17,7 @@
 #ifndef SHARED_CUBIN_LOADER_H
 #define SHARED_CUBIN_LOADER_H
 
-#include "3rdparty/common/cudaDriverWrapper.h"
+#include "3rdparty/common/cuda_driver.h"
 #include <cuda_runtime_api.h>
 #include <memory>
 #include <mutex>
@@ -77,16 +77,16 @@ public:
                 }
                 else
                 {
-                    cuErrCheck(mDriver.cuModuleLoadData(&hmod, kernelMeta.mCubin), mDriver);
+                    checkCu(cuModuleLoadData(&hmod, kernelMeta.mCubin));
                     mModules.insert(std::make_pair(kernelMeta.mCubin, hmod));
                 }
 
                 Fp8Gemm1x1KernelInfo funcInfo;
                 funcInfo.mMetaInfoIndex = i;
-                cuErrCheck(mDriver.cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod, kernelMeta.mFuncName), mDriver);
+                checkCu(cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod, kernelMeta.mFuncName));
                 if (kernelMeta.mSharedMemBytes >= DEFAULT_SMEM_SIZE)
                 {
-                    if (mDriver.cuFuncSetAttribute(funcInfo.mDeviceFunction,
+                    if (cuFuncSetAttribute(funcInfo.mDeviceFunction,
                             CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, kernelMeta.mSharedMemBytes)
                         != CUDA_SUCCESS)
                     {
@@ -116,17 +116,14 @@ public:
         CUfunction const func = findIter->second.mDeviceFunction;
 
         void* kernelParams[] = {&params, nullptr};
-        cuErrCheck(mDriver.cuLaunchKernel(func, mProp.multiProcessorCount, 1, 1, kernelMeta.mThreadsPerCTA, 1, 1,
-                        kernelMeta.mSharedMemBytes, ss, kernelParams, nullptr),
-            mDriver);
+        checkCu(cuLaunchKernel(func, mProp.multiProcessorCount, 1, 1, kernelMeta.mThreadsPerCTA, 1, 1,
+                        kernelMeta.mSharedMemBytes, ss, kernelParams, nullptr));
     }
 
     virtual ~TSharedCubinKernel() = default;
 
 protected:
     cudaDeviceProp mProp;
-
-    CUDADriverWrapper mDriver;
 
     TKernelMeta const* mKernelMeta;
     int32_t mKernelMetaCount;

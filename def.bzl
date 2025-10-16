@@ -1,7 +1,17 @@
 load(
     "@local_config_cuda//cuda:build_defs.bzl",
     "cuda_default_copts",
+    _if_cuda = "if_cuda",
 )
+
+load(
+    "@local_config_rocm//rocm:build_defs.bzl",
+    "rocm_default_copts",
+    _if_rocm = "if_rocm",
+)
+
+if_rocm = _if_rocm
+if_cuda = _if_cuda
 
 def rpm_library(
         name,
@@ -122,27 +132,105 @@ def rpm_library(
             **kwargs
         )
 
-def torch_deps():
-    torch_version = "2.1_py310"
-    return [
-        "@torch_" + torch_version + "_cpu//:torch_api",
-        "@torch_" + torch_version + "_cpu//:torch",
-    ]
-
 def copts():
     return [
-        "-DTHRUST_IGNORE_CUB_VERSION_CHECK",
         "-DTORCH_CUDA",
+    ] + if_cuda([
+        "-DTHRUST_IGNORE_CUB_VERSION_CHECK",
         "-DUSE_C10D_NCCL",
         "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE",
-    ]
-
+    ]) + if_rocm([
+        "-x", "rocm",
+    ])
 
 def cuda_copts():
-    return copts() + cuda_default_copts() + [
-        "-nvcc_options=relaxed-constexpr",
-        "-nvcc_options=ftz=true",
-	"-nvcc_options=generate-line-info",
-	"-nvcc_options=threads=4",
-	# "-G",
-    ]
+    # add --objdir-as-tempdir to rm tmp file after build
+    return copts() + cuda_default_copts() + if_cuda(["-nvcc_options=objdir-as-tempdir"])
+
+def rocm_copts():
+    return copts() + rocm_default_copts() + if_rocm(["-Wc++17-extensions"])
+
+def any_cuda_copts():
+    return copts() + cuda_default_copts() + if_cuda(["-nvcc_options=objdir-as-tempdir"]) + rocm_default_copts() + if_rocm(["-Wc++17-extensions"])
+
+def gen_cpp_code(name, elements_list, template_header, template, template_tail,
+                 element_per_file = 1, suffix=".cpp"):
+    bases = []
+    base = 1
+
+    for i in range(len(elements_list)):
+        base = len(elements_list[i]) * base
+
+    base_tmp = base
+    for i in range(len(elements_list)):
+        base_tmp = base_tmp // len(elements_list[i])
+        bases.append(base_tmp)
+
+    files = []
+    current = 0
+    count = 0
+    current_str = template_header
+    for i in range(base):
+        replace_elements_list = []
+        num = i
+        for j in range(len(bases)):
+            this_element = elements_list[j][num // bases[j]]
+            if type(this_element) == 'tuple':
+                replace_elements_list.extend(this_element)
+            else:
+                replace_elements_list.append(this_element)
+            num %= bases[j]
+        # for all permutations here
+
+        if type(replace_elements_list[0]) == "tuple":
+            replace_elements_list = replace_elements_list[0]
+        else:
+            replace_elements_list = tuple(replace_elements_list)
+        current_str += template.format(*replace_elements_list)
+        current += 1
+        if current == element_per_file or i == base - 1:
+            cpp_name = name + "_" + str(count)
+            count += 1
+            file_name = cpp_name + suffix
+            content = current_str + template_tail
+            native.genrule(
+                name = cpp_name,
+                srcs = [],
+                outs = [file_name],
+                cmd = "cat > $@  << 'EOF'\n" + content + "EOF",
+            )
+            current = 0
+            current_str = template_header
+            files.append(cpp_name)
+
+    native.filegroup(
+        name = name,
+        srcs = files
+    )
+
+
+def _read_release_version_impl(repository_ctx):
+    # Read the release_version.py file
+    release_version_content = repository_ctx.read(repository_ctx.path(Label("//rtp_llm:release_version.py")))
+    # Extract the RELEASE_VERSION value from the Python file
+    # We assume the format is RELEASE_VERSION = "x.x.x"
+    release_version = "0.0.1"  # fallback version
+
+    # Look for the pattern RELEASE_VERSION = "x.x.x"
+    pattern = 'RELEASE_VERSION = "'
+    start_index = release_version_content.find(pattern)
+    if start_index != -1:
+        # Find the start of the version string
+        start_index += len(pattern)
+        # Find the end of the version string
+        end_index = release_version_content.find('"', start_index)
+        if end_index != -1:
+            release_version = release_version_content[start_index:end_index]
+
+    repository_ctx.file("BUILD", "")
+    repository_ctx.file("defs.bzl", "RELEASE_VERSION = '{}'".format(release_version))
+
+read_release_version = repository_rule(
+    implementation = _read_release_version_impl,
+    attrs = {},
+)

@@ -1,6 +1,5 @@
 *~
 *.o
-*build*/
 __pycache__/
 .vscode
 .idea
@@ -37,7 +36,41 @@ rpm/*.log
 
 logs/
 *.log
+deep_gemm_runtime/
 
 package/requirements*.txt
-package/maga_transformer*.whl
+package/rtp_llm*.whl
 package/maga_start.sh
+rtp_llm/test-data/*
+
+model_rpc_service_pb2.py
+model_rpc_service_pb2_grpc.py
+rtp_llm/cpp/deep_gemm/cutlass_hdr
+
+cuda_profiler*.json
+normal_profiler*.json
+
+core-*
+
+.specstory
+
+# Debug and build output files
+out
+err
+*.sh
+test_out
+test_err
+errcp
+
+# Model loader debug tests
+rtp_llm/model_loader/test/
+
+# Additional debug files
+git
+git.diff
+
+*.mo
+*build*/
+.doctrees/
+node_modules/
+docs/index/dist/
