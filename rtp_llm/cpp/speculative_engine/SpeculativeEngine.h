@@ -84,10 +84,6 @@ public:
         }
     }
 
-    const ResourceContext& resourceContext() const {
-        return resource_context_;
-    }
-
     bool isMTPEagle() override {
         return sp_type_ == "mtp" || isEagle();
     }
@@ -138,7 +134,7 @@ private:
     void         tpSyncDisableSPRun(bool& all_streams_disable_sp_run);
     void         reportMetrics();
 
-    std::shared_ptr<GenerateStream> enqueueMinFakeQuery(int32_t max_new_tokens, bool fake_hidden_states = false);
+    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens, bool fake_hidden_states = false);
 
     std::list<GenerateStreamPtr> extractFirstPrefillStreams(std::list<GenerateStreamPtr>& streams);
 
@@ -159,7 +155,6 @@ private:
     const std::string               sp_type_;
     std::thread                     loop_thread_;
     std::atomic<bool>               running_{false};
-    ResourceContext                 resource_context_;
     std::shared_ptr<CudaProfiler_E> profiler_;
     int                             profiler_step_ = 0;
 };

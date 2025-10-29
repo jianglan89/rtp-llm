@@ -123,7 +123,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     hipblas_mm_wrapper_->setStream(stream_);
     fmha_runner_.reset(new rocmFmhaWrapper());
     fmha_runner_->init(stream_);
-    moe_runner_.reset(new rocmMoeWrapper());
+    //moe_runner_.reset(new rocmMoeWrapper());
     ck_gemm_runner_.reset(new rocmCKGemmWrapper());
 
     // select mla type
@@ -421,7 +421,7 @@ SelectOutput ROCmDevice::select(const SelectParams& params) {
                                         output->data(),
                                         input.data(),
                                         (int*)params.index.data(),
-                                        (int)params.index.size(),
+                                        params.index.size(),
                                         num_selected_element,
                                         0,
                                         stream_);
