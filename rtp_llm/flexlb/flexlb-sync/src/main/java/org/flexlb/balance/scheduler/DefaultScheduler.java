@@ -1,7 +1,8 @@
 package org.flexlb.balance.scheduler;
 
+import lombok.Getter;
+import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.LoadBalanceStrategyFactory;
-import org.flexlb.balance.SchedulerFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.MasterResponse;
@@ -10,11 +11,10 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
-import org.flexlb.enums.ScheduleType;
 import org.flexlb.service.config.ConfigService;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
-import org.flexlb.utils.LoggingUtils;
+import org.flexlb.util.LoggingUtils;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
@@ -28,39 +28,41 @@ import java.util.Map;
  * date: 2025/4/20
  */
 @Component("defaultScheduler")
-@DependsOn({"randomStrategy", "lowestCacheUsedStrategy", "shortestTTFTStrategy"})
+@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy"})
 public class DefaultScheduler implements Scheduler {
+
+    @Getter
     private final LoadBalancer prefillLoadBalancer;
     private final LoadBalancer decodeLoadBalancer;
     private final LoadBalancer vitLoadBalancer;
     private final LoadBalancer fusionLoadBalancer;
-    private final EngineWorkerStatus engineWorkerStatus;
 
-    public DefaultScheduler(ConfigService configService, EngineWorkerStatus engineWorkerStatus) {
-        this.engineWorkerStatus = engineWorkerStatus;
+    public DefaultScheduler(ConfigService configService) {
         prefillLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
                 configService.loadBalanceConfig().getLoadBalanceStrategy());
-        decodeLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(LoadBalanceStrategyEnum.LOWEST_CACHE_USED);
+        decodeLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(LoadBalanceStrategyEnum.WEIGHTED_CACHE);
         vitLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
                 configService.loadBalanceConfig().getLoadBalanceStrategy());
         fusionLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
                 configService.loadBalanceConfig().getLoadBalanceStrategy());
-        SchedulerFactory.register(ScheduleType.DEFAULT, this);
     }
 
     public MasterResponse select(BalanceContext balanceContext) {
         if (balanceContext.getMasterRequest() == null) {
             LoggingUtils.error("masterRequest is null");
+            return MasterResponse.code(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
         }
         MasterRequest masterRequest = balanceContext.getMasterRequest();
         String modelName = masterRequest.getModel();
 
-        Map<String/*modelName*/, ModelWorkerStatus> targetModelRoleWorkerStatusMap = engineWorkerStatus.getModelRoleWorkerStatusMap();
-        if (targetModelRoleWorkerStatusMap.isEmpty()) {
+        Map<String/*modelName*/, ModelWorkerStatus> targetModelRoleWorkerStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP;
+        if (MapUtils.isEmpty(targetModelRoleWorkerStatusMap)) {
             LoggingUtils.error("targetModelRoleWorkerStatusMap is empty");
+            return MasterResponse.code(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
         }
         if (targetModelRoleWorkerStatusMap.get(modelName) == null) {
             LoggingUtils.error("targetModelRoleWorkerStatusMap has no key named {}", modelName);
+            return MasterResponse.code(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
         }
         ModelWorkerStatus workerStatus = targetModelRoleWorkerStatusMap.get(modelName);
         List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
@@ -70,7 +72,7 @@ public class DefaultScheduler implements Scheduler {
         long interRequestId = balanceContext.getInterRequestId();
         masterResponse.setInterRequestId(interRequestId);
 
-        long startTimeInMs = System.currentTimeMillis();
+        long startTimeInMs = System.nanoTime() / 1000;
 
         // INFO  暂时不支持既有prefill又有pd fusion的服务
         if (roleTypeList.contains(RoleType.PREFILL)) {
@@ -90,7 +92,7 @@ public class DefaultScheduler implements Scheduler {
             group = prefillServerStatus.getGroup();
             ServerStatus decodeServerStatus = decodeLoadBalancer.select(balanceContext, RoleType.DECODE, group);
             if (!decodeServerStatus.isSuccess()) {
-                prefillLoadBalancer.releaseLocalCache(modelName, ip+":"+port, interRequestId);
+                prefillLoadBalancer.releaseLocalCache(modelName, ip + ":" + port, interRequestId);
                 masterResponse.setSuccess(false);
                 masterResponse.setCode(StrategyErrorType.NO_DECODE_WORKER.getErrorCode());
                 masterResponse.setErrorCode(StrategyErrorType.NO_DECODE_WORKER.getErrorMsg() + " : " + decodeServerStatus.getMessage());
@@ -132,17 +134,11 @@ public class DefaultScheduler implements Scheduler {
             serverStatusList.add(vitServerStatus);
         }
 
-        long costTime = System.currentTimeMillis() - startTimeInMs;
+        long costTime = System.nanoTime() / 1000 - startTimeInMs;
         balanceContext.getRequestContext().getSpan().addEvent("load balance finish(" + costTime + "ms)");
 
         masterResponse.setServerStatus(serverStatusList);
         masterResponse.setSuccess(true);
         return masterResponse;
     }
-
-    @Override
-    public LoadBalancer getPrefillLoadBalancer() {
-        return prefillLoadBalancer;
-    }
-
 }

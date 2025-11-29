@@ -10,9 +10,9 @@ def git_deps():
     git_repository(
         name = "aiter_src",
         remote = "https://github.com/ROCm/aiter.git",
-        commit = "94934e7d7cd5e11d81a2ded2a54d35f9cec4374d", # update codegen.py (#880)
+        commit = "329d07ba5d77f7d6b2a0557174288c5707f95e5f", # [Triton] DS a16w8 GEMM and fused reduce_rms_fp8_group_quant (#1328)
         recursive_init_submodules = True,
-        patches = ["//3rdparty/aiter:aiter.patch", "//3rdparty/aiter:gemm_blockscale.patch", "//3rdparty/aiter:gemm_a8w8.patch"],
+        patches = ["//3rdparty/aiter:aiter.patch", "//3rdparty/aiter:gemm_a8w8.patch"],
         patch_cmds = [
             "echo 'from aiter.jit.core import compile_ops, get_args_of_build, build_module, get_module' >> build_aiter_module.py",
             "echo 'from typing import Dict' >> build_aiter_module.py",
@@ -54,9 +54,11 @@ def git_deps():
             "echo 'if __name__ == \"__main__\":' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_aiter_enum\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_custom_all_reduce\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_quick_all_reduce\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_norm\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_rmsnorm\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_mha_fwd\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_fmha_v3_varlen_fwd\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_gemm_a8w8_blockscale\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_quant\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_smoothquant\")' >> build_aiter_module.py",

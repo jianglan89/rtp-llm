@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmAllocator.h"
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/kernels/eplb/experts_stats_kernels.h"
 #include "rtp_llm/cpp/kernels/add_residual_kernels.h"
 #include "rtp_llm/cpp/devices/ShapeCheck.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
@@ -13,6 +14,9 @@
 #include "rtp_llm/cpp/kernels/embedding_kernels.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
+
+#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/core/BufferHelper.h"
 
 // TODO(rocm): Idealy we just link compiler_rt for this symbol.
 extern "C" half __truncdfhf2(double a) {
@@ -125,6 +129,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     fmha_runner_->init(stream_);
     //moe_runner_.reset(new rocmMoeWrapper());
     ck_gemm_runner_.reset(new rocmCKGemmWrapper());
+    ck_w8a8_gelu_gemm_runner_.reset(new rocmCKW8A8GeluGemmWrapper());
 
     // select mla type
     if (params.mla_ops_type != MlaOpsType::AUTO) {
@@ -215,7 +220,7 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
 
 void ROCmDevice::copy(const CopyParams& params) {
     ROCM_CHECK_VALUE(params.src.type() == params.dst.type(),
-                     "copy dst[%d] and src[%d] need has same type.",
+                     "copy src[%d] and dst[%d] need has same type.",
                      params.src.type(),
                      params.dst.type());
 
@@ -461,6 +466,63 @@ BufferPtr ROCmDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     return embeddings;
 }
 
+void ROCmDevice::updateExpertGpuLoads(const MoeConfigs&          moe_conf,
+                                      const OptionalExpertStats& expert_stats,
+                                      BufferPtr                  expert_ids) {
+    if (expert_stats.has_value() && expert_ids->size()) {
+        auto& stats = expert_stats.value();
+        launch_update_gpu_loads(expert_ids->data<int>(),
+                                stats.getLayerGpuLoads(),
+                                expert_ids->size(),
+                                stats.phy_exp_num,
+                                moe_conf.ep_rank,
+                                moe_conf.ep_size,
+                                stream_);
+    }
+}
+
+void ROCmDevice::balanceExperts(BufferPtr                  expert_ids,
+                                const OptionalExpertStats& expert_stats,
+                                const MoeConfigs&          moe_conf,
+                                const FfnLayerWeights&     weights) {
+    if (expert_stats.has_value() && weights.log2phy) {
+        const auto& expert_stats_v = expert_stats.value();
+
+        int* log2phy          = weights.log2phy->data<int>();
+        int* logic_expert_cnt = weights.logic_expert_cnt->data<int>();
+
+        switch (moe_conf.balance_method) {
+            case EplbBalanceMethod::EQUAL:
+                if (expert_ids->type() == DataType::TYPE_INT64) {
+                    launch_equal_expert_balance(expert_ids->data<int64_t>(),
+                                                expert_stats_v.getLayerLogStats(),
+                                                log2phy,
+                                                logic_expert_cnt,
+                                                expert_stats_v.log_exp_num,
+                                                expert_stats_v.phy_exp_num,
+                                                expert_ids->size(),
+                                                moe_conf.use_all_gather ? 0 : moe_conf.ep_rank,
+                                                stream_);
+                } else {
+                    launch_equal_expert_balance(expert_ids->data<int>(),
+                                                expert_stats_v.getLayerLogStats(),
+                                                log2phy,
+                                                logic_expert_cnt,
+                                                expert_stats_v.log_exp_num,
+                                                expert_stats_v.phy_exp_num,
+                                                expert_ids->size(),
+                                                moe_conf.use_all_gather ? 0 : moe_conf.ep_rank,
+                                                stream_);
+                }
+                break;
+            default:
+                throw std::runtime_error("Unsupported balance method");
+                break;
+        }
+        ROCM_CHECK_ERROR();
+    }
+}
+
 MemoryStatus ROCmDevice::getDeviceMemoryStatus() {
     MemoryStatus status;
     size_t       total_bytes;
@@ -641,5 +703,54 @@ void ROCmCommHook::hook_sync() const {
 //         }
 //     }
 // }
+
+BufferPtr ROCmDevice::mhaQKVGemm(const AttentionLayerParams& params) {
+    const auto& input      = params.input;
+    const auto& qkv_weight = params.weights.qkv_weight;
+
+    // typically local_head_num * size_per_head + 2 * local_head_num_kv * size_per_head
+    const auto qkv_merged_size = qkv_weight->kernel->shape()[1];
+
+    BufferPtr qkv;
+    if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight && params.qscheme == QScheme::Qint8PerTensor) {        
+        BufferPtr D = allocateBuffer({DataType::TYPE_FP16, {input.shape()[0], qkv_weight->kernel->shape()[1]}});
+        OptionalConstBufferRef bias = std::nullopt;
+        if (qkv_weight->bias) {
+            bias = *(qkv_weight->bias);
+        }
+        GemmParams qkv_gemm_params{input, *(qkv_weight->kernel), bias, D, DataType::TYPE_FP16,
+                                   DataType::TYPE_FP16, TransposeOperation::NONE, TransposeOperation::NONE};
+        qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;  
+    } else if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias) {
+        ActivationParams act_params(ActivationType::Identity,
+                                    nullptr,
+                                    mayGetRef(params.weights.qkv_weight->bias),
+                                    std::nullopt,
+                                    std::nullopt,
+                                    std::nullopt, nullptr, false,
+                                    params.qscheme);
+        auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));                            
+        auto lora_linear_params = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);                                                  
+        qkv = loraLinearWithActivation(LoraLinearWithActivationParams(lora_linear_params, act_params));     
+    } else {
+        auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));    
+        qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
+    }
+    printBufferData(*qkv, "qkv");
+    if (params.weights.q_norm_weight) {
+        RTP_LLM_CHECK_WITH_INFO(params.weights.k_norm_weight != nullptr,
+                                "q_norm_weight and k_norm_weight should both be provided");
+        RTP_LLM_CHECK_WITH_INFO(params.ln_params.norm_type == NormType::rmsnorm, "qkRmsNorm only support rmsnorm");
+        auto qk_rmsnorm_output = qkRmsNorm(QkRmsNormParams({qkv,
+                                                            *params.weights.q_norm_weight,
+                                                            *params.weights.k_norm_weight,
+                                                            params.ln_params.eps,
+                                                            params.configs.head_num,
+                                                            params.configs.kv_head_num,
+                                                            params.configs.size_per_head}));
+        printBufferData(*qkv, "qkv_after_qk_norm");
+    }
+    return qkv;
+}
 
 }  // namespace rtp_llm

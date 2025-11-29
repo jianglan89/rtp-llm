@@ -102,7 +102,7 @@ struct HWKernelConfig {
 };
 
 struct DeviceResourceConfig {
-    int64_t     device_reserve_memory_bytes = 0;
+    int64_t     device_reserve_memory_bytes = -1073741824;
     int64_t     host_reserve_memory_bytes   = 4LL * 1024 * 1024 * 1024;
     int         overlap_math_sm_count       = 0;
     int         overlap_comm_type           = 0;
@@ -198,11 +198,12 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size           = 1;
-    int         scheduler_reserve_resource_ratio = 5;
-    bool        enable_fast_gen                  = false;
-    bool        enable_partial_fallback          = false;
-    int64_t     fast_gen_context_budget          = -1;
+    int64_t max_context_batch_size           = 1;
+    int     scheduler_reserve_resource_ratio = 5;
+    bool    enable_fast_gen                  = false;
+    bool    enable_partial_fallback          = false;
+    int64_t fast_gen_context_budget          = -1;
+
     std::string to_string() const;
     void        update_from_env_for_test();
 };

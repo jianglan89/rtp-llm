@@ -1,14 +1,5 @@
 package org.flexlb.cache.core;
 
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.atomic.LongAdder;
-
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
-
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
@@ -17,6 +8,14 @@ import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * KVCache管理器
@@ -50,8 +49,7 @@ public class KvCacheManager {
      * 性能统计
      */
     private final LongAdder totalUpdates = new LongAdder();
-    private volatile long lastOperationTime = System.currentTimeMillis();
-    
+
     @PostConstruct
     public void init() {
         log.info("KvCacheManager initialized successfully");
@@ -78,8 +76,6 @@ public class KvCacheManager {
         if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return Collections.emptyMap();
         }
-
-        lastOperationTime = System.currentTimeMillis();
 
         // 使用候选引擎列表
         List<String> enginesIpPorts = workerStatusProvider.getWorkerIpPorts(modelName, roleType, group);
@@ -127,7 +123,6 @@ public class KvCacheManager {
         }
 
         totalUpdates.increment();
-        lastOperationTime = System.currentTimeMillis();
         // report metrics
         cacheMetricsReporter.reportEngineLocalMetrics(engineIPort, role, engineLocalView.size(engineIPort));
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
@@ -143,7 +138,6 @@ public class KvCacheManager {
         engineLocalView.clear();
 
         totalUpdates.reset();
-        lastOperationTime = System.currentTimeMillis();
         // report
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
 

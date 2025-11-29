@@ -166,11 +166,11 @@ public:
     std::vector<int64_t> moe_layer_index_ = {};
 
     // EPLB
-    bool             enable_eplb_      = false;
-    int64_t          phy_exp_num_      = 0;  // number of physical experts
-    int64_t          eplb_update_time_ = 5000;
-    EplbMode         eplb_mode_        = EplbMode::NONE;
-    pybind11::object py_eplb_;
+    bool                                   enable_eplb_      = false;
+    int64_t                                phy_exp_num_      = 0;  // number of physical experts
+    int64_t                                eplb_update_time_ = 5000;
+    EplbMode                               eplb_mode_        = EplbMode::NONE;
+    __attribute__((visibility("default"))) pybind11::object py_eplb_;
 
     bool   has_positional_encoding_    = false;
     bool   has_pre_decoder_layernorm_  = false;
@@ -252,6 +252,7 @@ public:
     int64_t  prefill_max_wait_timeout_ms_     = 0;
     int64_t  decode_retry_times_              = 0;
     int64_t  decode_retry_timeout_ms_         = 0;
+    int64_t  decode_retry_interval_ms_        = 1;
     int64_t  decode_polling_kv_cache_step_ms_ = 0;
     int64_t  decode_polling_call_prefill_ms_  = 0;
     int64_t  rdma_connect_retry_times_        = 0;

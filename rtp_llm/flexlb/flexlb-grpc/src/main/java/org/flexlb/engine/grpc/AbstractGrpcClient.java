@@ -1,12 +1,5 @@
 package org.flexlb.engine.grpc;
 
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-
 import io.grpc.ManagedChannel;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -15,6 +8,14 @@ import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.util.CommonUtils;
+import org.springframework.scheduling.annotation.Scheduled;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * @author zjw
@@ -98,7 +99,10 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
             engineLocalView.removeAllCacheBlockOfEngine(ipPort);
             globalCacheIndex.removeAllCacheBlockOfEngine(ipPort);
         }
+    }
 
+    @Scheduled(fixedRate = 2000)
+    public void reportChannelPoolSize() {
         grpcReporter.reportChannelPoolSize(channelPool.size());
     }
 
@@ -133,11 +137,30 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
         private final String channelKey;
         private final ManagedChannel channel;
         private final STUB rpcServiceStub;
+        private final long createTime;
+        private volatile long lastUsedTime;
+        private volatile long expireTime;
 
         public Invoker(String channelKey, ManagedChannel channel) {
             this.channelKey = channelKey;
             this.channel = channel;
             this.rpcServiceStub = createStub(channel);
+            long currentTime = System.nanoTime() / 1000;
+            this.createTime = currentTime;
+            this.lastUsedTime = currentTime;
+            this.expireTime = 0;
+        }
+
+        public void updateLastUsedTime() {
+            this.lastUsedTime = System.nanoTime() / 1000;
+        }
+
+        public void markExpired() {
+            this.expireTime = System.nanoTime() / 1000;
+        }
+
+        public long getConnectionDuration() {
+            return expireTime > 0 ? expireTime - createTime : System.nanoTime() / 1000 - createTime;
         }
 
         public void shutdown() {

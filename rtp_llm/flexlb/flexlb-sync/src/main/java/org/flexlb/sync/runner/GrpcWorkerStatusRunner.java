@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -11,8 +12,9 @@ import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
@@ -26,21 +28,21 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final String modelName;
     private final String site;
     private final String group;
-    private final ConcurrentHashMap<String/*ipPort*/, WorkerStatus> workerStatuses;
+    private final Map<String/*ipPort*/, WorkerStatus> workerStatuses;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final String ip;
     private final int port;
     private final int grpcPort;
-    private final long startTime = System.currentTimeMillis();
+    private final long startTime = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
-    private final long syncRequstTimeoutMs;
+    private final long syncRequestTimeoutMs;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, String group,
-                                  ConcurrentHashMap<String/*ip*/, WorkerStatus> workerStatuses,
+                                  Map<String/*ip*/, WorkerStatus> workerStatuses,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
-                                  long syncRequstTimeoutMs) {
+                                  long syncRequestTimeoutMs) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -52,14 +54,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.group = group;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
-        this.syncRequstTimeoutMs = syncRequstTimeoutMs;
+        this.syncRequestTimeoutMs = syncRequestTimeoutMs;
     }
 
     @Override
     public void run() {
 
         logger.info("GrpcWorkerStatusRunner run for {}", ipPort);
-        long startTime = System.currentTimeMillis();
+        long startTime = System.nanoTime() / 1000;
 
         WorkerStatus workerStatus = workerStatuses.get(ipPort);
         long latestFinishedTaskVersion = Optional.ofNullable(workerStatus)
@@ -73,7 +75,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
     private WorkerStatusResponse launchGrpcStatusCheck(String ip, int grpcPort, long latestFinishedTaskVersion) {
         try {
-            EngineRpcService.WorkerStatusPB workerStatusPB = engineGrpcService.getWorkerStatus(ip, grpcPort, latestFinishedTaskVersion, syncRequstTimeoutMs);
+            EngineRpcService.WorkerStatusPB workerStatusPB = engineGrpcService.getWorkerStatus(ip, grpcPort, latestFinishedTaskVersion, syncRequestTimeoutMs);
             return EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB);
         } catch (Throwable throwable) {
             handleException(throwable);
@@ -87,15 +89,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
         try {
             if (newWorkerStatus == null) {
                 logger.info("query engine worker status via gRPC, response body is null");
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.RESPONSE_NULL);
+                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.RESPONSE_NULL, ip);
                 return;
             }
-            logger.info("gRPC Worker Status - handled for {}, role:{} ", ipPort, newWorkerStatus.getRole());
 
             if (newWorkerStatus.getMessage() != null) {
                 WorkerStatus workerStatus = getOrCreateWorkerStatus();
                 workerStatus.setAlive(false);
-                logger.info("query engine worker status via gRPC, msg={}", newWorkerStatus.getMessage());
+                logger.error("query engine worker status via gRPC, msg={}", newWorkerStatus.getMessage());
                 return;
             }
 
@@ -116,6 +117,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             Long currentVersion = workerStatus.getStatusVersion();
             if (currentVersion >= responseVersion) {
+                // 版本相同但是也需要更新 expirationTime
+                // Set expiration time to 3 seconds from now
+                workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
+                // 更新任务状态
+                List<TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
+                List<TaskInfo> finishedTaskList = newWorkerStatus.getFinishedTaskList();
+                workerStatus.updateTaskStates(runningTaskInfo, finishedTaskList);
                 logger.info("query engine worker status via gRPC, version is not updated, currentVersion: {}, responseVersion: {}",
                         currentVersion, responseVersion);
                 return;
@@ -130,21 +138,24 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setAlive(newWorkerStatus.isAlive());
             workerStatus.setVersion(String.valueOf(newWorkerStatus.getVersion()));
             workerStatus.setStatusVersion(responseVersion);
-            workerStatus.setRunningTaskList(newWorkerStatus.getRunningTaskInfo());
 
-            // 更新完结和过期的任务
-            workerStatus.clearFinishedTaskAndTimeoutTask(newWorkerStatus.getFinishedTaskList());
+            List<TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
+            List<TaskInfo> finishedTaskList = newWorkerStatus.getFinishedTaskList();
+            workerStatus.setRunningTaskList(runningTaskInfo);
 
-            engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus);
+            // 更新本地任务状态（包含检查丢失、更新运行、清理完成）
+            workerStatus.updateTaskStates(runningTaskInfo, finishedTaskList);
 
-            // Set expiration time to 3 seconds from now
-            workerStatus.getExpirationTime().set(System.currentTimeMillis() + 3000);
-            workerStatus.getLastUpdateTime().set(System.currentTimeMillis());
+            engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
+                    Optional.ofNullable(runningTaskInfo).map(List::size).orElse(0),
+                    Optional.ofNullable(finishedTaskList).map(List::size).orElse(0));
+
+            workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
             logWorkerStatusUpdate(startTime, workerStatus);
 
         } catch (Throwable e) {
-            log("engine worker status check via gRPC exception, msg: " + e.getMessage(), e);
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR);
+            log("engine worker status check via gRPC exception, msg: " + e.getMessage());
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, ip);
         }
     }
 
@@ -153,7 +164,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 ipPort,
                 workerStatus.getRole(),
                 workerStatus.getRunningQueueTime(),
-                System.currentTimeMillis() - startTime);
+                System.nanoTime() / 1000 - startTime);
     }
 
     private WorkerStatus getOrCreateWorkerStatus() {
@@ -169,33 +180,23 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void handleException(Throwable ex) {
-        log("gRPC worker status check failed", ex);
+        log("gRPC worker status check failed, msg=" + ex.getMessage());
         // Report specific error based on exception type
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT);
+            logger.info("gRPC worker status check timeout, msg=" + ex.getMessage() + ", ipPort: " + ipPort + ", rt: " + (System.nanoTime() / 1000 - startTime));
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, ip);
         } else {
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE);
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, ip);
         }
     }
 
     private void log(String msg) {
-        logger.info("[gRPC][{}][{}][{}][{}][{}ms]: {}",
+        logger.info("[gRPC][{}][{}][{}][{}][{}μs]: {}",
                 id,
                 site,
                 ipPort,
                 modelName,
-                System.currentTimeMillis() - startTime,
+                System.nanoTime() / 1000 - startTime,
                 msg);
-    }
-
-    private void log(String msg, Throwable e) {
-        logger.info("[gRPC][{}][{}][{}][{}][{}ms]: {}",
-                id,
-                site,
-                ipPort,
-                modelName,
-                System.currentTimeMillis() - startTime,
-                msg,
-                e);
     }
 }

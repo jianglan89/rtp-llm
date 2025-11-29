@@ -14,7 +14,6 @@ py_library(
     ]),
     deps = [
         "//rtp_llm/models_py/distributed:deepep_wrapper",
-        "//rtp_llm/models_py/distributed:process_group_state",
     ],
     visibility = ["//visibility:public"],
 )
@@ -23,12 +22,20 @@ py_library(
 flashinfer = ["flashinfer-python"]
 requirement(flashinfer)
 
+
+filegroup(
+    name = "cutlass_moe_config",
+    srcs = glob(["modules/configs/cutlass_groupgemm/*"]),
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
         "modules/**/*.py",
     ]),
+    data = [":cutlass_moe_config"],
     deps = [
         ":utils",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
@@ -44,14 +51,16 @@ py_library(
     name = "modules_cuda",
     srcs = glob([
         "modules/cuda/*.py",
-    ]),
+        "modules/cuda/**/*.py",
+    ])
 )
 
 py_library(
     name = "modules_rocm",
     srcs = glob([
         "modules/rocm/*.py",
-    ]),
+        "modules/rocm/**/*.py",
+    ])
 )
 
 py_library(

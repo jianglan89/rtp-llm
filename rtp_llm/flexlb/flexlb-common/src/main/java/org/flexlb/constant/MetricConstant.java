@@ -23,9 +23,9 @@ public class MetricConstant {
     public static final String ENGINE_DECODE_WORKER_NUMBER = "app.engine.health.check.engine.decode.worker.number";
 
     /**
-     * VipServer Client 请求结果
+     * 服务发现 Client 请求结果
      */
-    public static final String ENGINE_NUMBER_VIP_RESULT = "app.engine.health.check.engine.worker.number.vipserver.result";
+    public static final String ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT = "app.engine.health.check.engine.worker.number.service.discovery.result";
 
     /**
      * 引擎worker剩余可用并发数
@@ -48,30 +48,27 @@ public class MetricConstant {
 
     public static final String ENGINE_BALANCING_MASTER_SCHEDULE_RT = "app.engine.balancing.master.all.rt";
 
-    /**
-     * Master负载均衡服务的失败qps
-     */
-    public static final String ENGINE_BALANCING_MASTER_FAIL_QPS = "app.engine.balancing.master.fail.qps";
-
-    /**
-     * prefill 负载均衡 筛选节点QPS
-     */
-    public static final String PREFILL_BALANCE_SELECT_QPS = "app.engine.prefill.balance.select.qps";
-
-    /**
-     * prefill 负载均衡 筛选节点失败QPS
-     */
-    public static final String PREFILL_BALANCE_SELECT_FAIL_QPS = "app.engine.prefill.balance.select.qps.error";
-
-    /**
-     * prefill 负载均衡 筛选节点花费的时间
-     */
-    public static final String PREFILL_BALANCE_TOKENIZE_COST = "app.engine.prefill.balance.select.cost";
+    public static final String ENGINE_BALANCING_MASTER_SELECT_DETAIL = "app.engine.balancing.master.select.detail";
 
     /**
      * 引擎队列等待时间
      */
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";
+
+    /**
+     * 引擎本地任务缓存大小
+     */
+    public static final String ENGINE_LOCAL_TASK_MAP_SIZE = "app.engine.health.check.local.task.map.size";
+
+    /**
+     * 引擎已完成任务列表大小
+     */
+    public static final String ENGINE_FINISHED_TASK_LIST_SIZE = "app.engine.health.check.finished.task.list.size";
+
+    /**
+     * 引擎正在运行任务信息大小
+     */
+    public static final String ENGINE_RUNNING_TASK_INFO_SIZE = "app.engine.health.check.running.task.info.size";
 
     /**
      * prefill master节点监控
@@ -96,10 +93,9 @@ public class MetricConstant {
     /**
      * 获取引擎worker信息服务的step latency 方差
      */
-    public final static String ENGINE_WORKER_INFO_STEP_LATENCY_VAR = "app.engine.worker.info.step.latency.var";
+    public static final String ENGINE_WORKER_INFO_STEP_LATENCY_VAR = "app.engine.worker.info.step.latency.var";
 
-
-    public final static String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
+    public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
 
     /* ------------------------ 缓存健康监控 -------------------------- */
 
@@ -169,6 +165,11 @@ public class MetricConstant {
      * 缓存块大小
      */
     public static final String CACHE_BLOCK_SIZE = "app.cache.block.size";
+    
+    /**
+     * 缓存键大小
+     */
+    public static final String CACHE_KEY_SIZE = "app.cache.key.size";
     
     /**
      * 缓存diff计算中新增块的数量
