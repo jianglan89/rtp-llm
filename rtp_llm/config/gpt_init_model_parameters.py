@@ -643,6 +643,8 @@ class GptInitModelParameters:
                 disable_dpc_random=get_env_bool("DISABLE_DPC_RANDOM", False),
                 enable_detail_log=get_env_bool("ENABLE_DETAIL_LOG", False),
                 check_nan=get_env_bool("CHECK_NAN", False),
+                viztrace_enable=get_env_bool("VIZTRACE_ENABLE", False),
+                viztrace_min_duration_ms=get_env_int("VIZTRACE_MIN_DURATION_MS", 100),
             )
         )
         # HWKernelConfig
