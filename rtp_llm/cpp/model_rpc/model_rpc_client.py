@@ -1,9 +1,13 @@
+import asyncio
+import contextlib
 import functools
 import logging
-from typing import AsyncGenerator, Optional
+import time
+from typing import AsyncGenerator, Dict, Optional
 
 import grpc
 from grpc import StatusCode
+from grpc import aio
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
@@ -263,6 +267,190 @@ def trans_output(
     return outputs_py
 
 
+class HostChannel:
+    __slots__ = ("channel", "last_used")
+    def __init__(self, channel: aio.Channel):
+        self.channel = channel
+        self.last_used = time.time()
+
+class HostChannelPool:
+    def __init__(self, options=None, idle_timeout=300, cleanup_interval=60):
+        """
+        idle_timeout: seconds to keep an unused channel before closing it
+        cleanup_interval: how often to scan for idle channels
+        """
+        self.options = options or []
+        self.idle_timeout = idle_timeout
+        self.cleanup_interval = cleanup_interval
+
+        self._channels: Dict[str, HostChannel] = {}
+        self._lock = asyncio.Lock()
+        self._cleanup_task: Optional[asyncio.Task] = None
+        self._stopped = False
+
+        # Start cleanup task only if there's a running event loop
+        try:
+            # Check if there's a running event loop
+            asyncio.get_running_loop()
+            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        except RuntimeError:
+            # No running event loop, defer task creation until later
+            pass
+
+    def __del__(self):
+        """Clean up resources when the pool is garbage collected"""
+        try:
+            # Check if there's a running event loop
+            loop = asyncio.get_running_loop()
+            if not self._stopped:
+                # Schedule the cleanup in the existing loop
+                asyncio.ensure_future(self.stop())
+        except RuntimeError:
+            # No running event loop, try to clean up synchronously
+            # This is a best-effort cleanup since we can't await in __del__
+            if not self._stopped:
+                self._stopped = True
+                if self._cleanup_task:
+                    self._cleanup_task.cancel()
+                # Can't close channels properly without event loop
+                # But at least mark as stopped and clear references
+                self._channels.clear()
+        except Exception as e:
+            # Log but don't raise - __del__ should not throw
+            logging.warning(f"Failed to cleanup HostChannelPool in __del__: {e}")
+
+    async def start(self):
+        # Deprecated, kept for compatibility
+        pass
+
+    async def stop(self):
+        self._stopped = True
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._cleanup_task
+        # close and drop everything
+        await self.close_all()
+
+    # ---------- main API ----------
+
+    async def get(self, target: str) -> aio.Channel:
+        """
+        Get or create a channel for `target`.
+        """
+        # Start cleanup task if it hasn't been started yet
+        if self._cleanup_task is None and not self._stopped:
+            try:
+                self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+                logging.info(f"Channel cleanup task started (idle_timeout={self.idle_timeout}s, cleanup_interval={self.cleanup_interval}s)")
+            except RuntimeError:
+                # Still no event loop, which is unusual in an async context
+                logging.warning("Failed to start channel cleanup task: no running event loop")
+
+        async with self._lock:
+            entry = self._channels.get(target)
+            if entry is None:
+                ch = aio.insecure_channel(target, options=self.options)
+                entry = HostChannel(ch)
+                self._channels[target] = entry
+            entry.last_used = time.time()
+            return entry.channel
+
+    async def recreate(self, target: str) -> aio.Channel:
+        """
+        Force-close and recreate a channel for `target`.
+        Useful after UNAVAILABLE/INTERNAL errors.
+        """
+        async with self._lock:
+            entry = self._channels.pop(target, None)  # remove from map
+        if entry is not None:
+            # close old channel, ignore errors but ensure it can be GC'd
+            with contextlib.suppress(asyncio.TimeoutError, Exception):
+                await asyncio.wait_for(entry.channel.close(), timeout=2.0)
+
+        # create new
+        ch = aio.insecure_channel(target, options=self.options)
+        async with self._lock:
+            self._channels[target] = HostChannel(ch)
+        return ch
+
+    async def delete(self, target: str):
+        """
+        Explicitly remove one host from pool and release all its resources.
+        """
+        async with self._lock:
+            entry = self._channels.pop(target, None)
+        if entry is not None:
+            with contextlib.suppress(asyncio.TimeoutError, Exception):
+                await asyncio.wait_for(entry.channel.close(), timeout=2.0)
+        # no reference left -> GC can collect it
+
+    async def close_all(self):
+        """
+        Close and drop all channels from the pool.
+        """
+        async with self._lock:
+            entries = list(self._channels.values())
+            self._channels.clear()
+
+        # close outside the lock
+        tasks = [asyncio.wait_for(e.channel.close(), timeout=2.0) for e in entries]
+        with contextlib.suppress(Exception):
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    # ---------- background cleanup ----------
+
+    async def _cleanup_loop(self):
+        logging.info(f"Channel cleanup loop started, will run every {self.cleanup_interval}s")
+        try:
+            while not self._stopped:
+                await asyncio.sleep(self.cleanup_interval)
+                await self._cleanup_idle()
+        except asyncio.CancelledError:
+            logging.info("Channel cleanup loop cancelled")
+        finally:
+            logging.info("Channel cleanup loop stopped")
+
+    async def _cleanup_idle(self):
+        """
+        Find idle hosts, remove them from the pool, and close their channels.
+        """
+        now = time.time()
+        to_close: list[tuple[str, HostChannel]] = []  # Keep target for logging
+
+        async with self._lock:
+            total_channels = len(self._channels)
+            for target, entry in list(self._channels.items()):
+                idle_time = now - entry.last_used
+                if idle_time > self.idle_timeout:
+                    logging.info(f"Channel {target} has been idle for {idle_time:.1f}s (timeout: {self.idle_timeout}s), marking for cleanup")
+                    to_close.append((target, entry))
+                    del self._channels[target]  # remove reference
+
+            remaining_channels = len(self._channels)
+            if to_close:
+                logging.info(f"Channel cleanup: closing {len(to_close)} idle channels, {remaining_channels} channels remaining (was {total_channels})")
+            elif total_channels > 0:
+                logging.debug(f"Channel cleanup: no idle channels found, {total_channels} active channels")
+
+        # Close outside lock
+        closed_count = 0
+        failed_count = 0
+        for target, entry in to_close:
+            try:
+                await asyncio.wait_for(entry.channel.close(), timeout=2.0)
+                closed_count += 1
+                logging.debug(f"Successfully closed channel for {target}")
+            except asyncio.TimeoutError:
+                failed_count += 1
+                logging.warning(f"Timeout while closing channel for {target}")
+            except Exception as e:
+                failed_count += 1
+                logging.warning(f"Error closing channel for {target}: {e}")
+
+        if to_close:
+            logging.info(f"Channel cleanup completed: {closed_count} channels closed successfully, {failed_count} failed")
+                
 class ModelRpcClient(object):
 
     def __init__(self, config: GptInitModelParameters, address: Optional[str] = None):
@@ -297,6 +485,20 @@ class ModelRpcClient(object):
             self._addresses = self._addresses[:serving_ranks]
         logging.info(f"client connect to rpc addresses: {self._addresses}")
         self.model_config = config
+
+        # Initialize the channel pool
+        options = [
+            ("grpc.max_metadata_size", 1024 * 1024 * 1024),
+        ]
+        self._channel_pool = HostChannelPool(
+            options=options,
+            idle_timeout=300,  # 5 minutes
+            cleanup_interval=60  # clean up every minute
+        )
+
+    async def close(self):
+        """Clean up resources when shutting down the client"""
+        await self._channel_pool.stop()
 
     async def enqueue(
         self, input_py: GenerateInput
@@ -335,21 +537,21 @@ class ModelRpcClient(object):
                     break
 
         try:
-            options = [
-                ("grpc.max_metadata_size", 1024 * 1024 * 1024),
-            ]
-            async with grpc.aio.insecure_channel(
-                address_list[input_py.request_id % len(address_list)], options=options
-            ) as channel:
-                stub = RpcServiceStub(channel)
-                response_iterator = stub.GenerateStreamCall(
-                    input_pb, timeout=grpc_timeout_seconds
-                )
-                # 调用服务器方法并接收流式响应
-                count = 0
-                async for response in response_iterator.__aiter__():
-                    count += 1
-                    yield trans_output(input_py, response, stream_state)
+            # Select target address
+            target_address = address_list[input_py.request_id % len(address_list)]
+
+            # Get channel from pool
+            channel = await self._channel_pool.get(target_address)
+            stub = RpcServiceStub(channel)
+
+            response_iterator = stub.GenerateStreamCall(
+                input_pb, timeout=grpc_timeout_seconds
+            )
+            # 调用服务器方法并接收流式响应
+            count = 0
+            async for response in response_iterator.__aiter__():
+                count += 1
+                yield trans_output(input_py, response, stream_state)
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
