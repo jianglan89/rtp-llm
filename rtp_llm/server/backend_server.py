@@ -53,7 +53,10 @@ class BackendServer(object):
                 os.environ["NCCL_P2P_DISABLE"] = "1"
         else:
             os.environ["NCCL_P2P_DISABLE"] = "1"
-        self._access_logger = AccessLogger()
+        self._access_logger = AccessLogger(
+            py_env_configs.server_config.rank_id,
+            py_env_configs.server_config.frontend_server_id
+        )
         self._gang_server = GangServer(py_env_configs)
         self._openai_endpoint = None
         self._lora_manager = None
