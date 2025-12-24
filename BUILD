@@ -18,6 +18,11 @@ config_setting(
 )
 
 config_setting(
+    name = "using_cuda12_8_x86",
+    define_values = {"using_cuda12": "true", "using_cuda12_8_x86": "true"},
+)
+
+config_setting(
     name = "using_cuda12_9_x86",
     define_values = {"using_cuda12": "true", "using_cuda12_9_x86": "true"},
 )
