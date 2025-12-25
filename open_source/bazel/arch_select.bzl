@@ -36,7 +36,7 @@ def requirement(names):
         native.py_library(
             name = name,
             deps = select({
-                "@//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
+                "@//:cuda_pre_12_8": [requirement_gpu_cuda12(name)],
                 "@//:using_cuda12_8_x86": [requirement_gpu_cuda12_8(name)],
                 "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@//:using_rocm": [requirement_gpu_rocm(name)],
@@ -91,7 +91,7 @@ def torch_deps():
             "@torch_2.3_py310_cpu_aarch64//:torch",
             "@torch_2.3_py310_cpu_aarch64//:torch_libs",
         ],
-        "@//:cuda_pre_12_9": [
+        "@//:cuda_pre_12_8": [
             "@torch_2.6_py310_cuda//:torch_api",
             "@torch_2.6_py310_cuda//:torch",
             "@torch_2.6_py310_cuda//:torch_libs",

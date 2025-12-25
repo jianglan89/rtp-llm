@@ -28,8 +28,8 @@ config_setting(
 )
 
 config_setting(
-    name = "cuda_pre_12_9",
-    define_values = {"using_cuda12_9_x86": "false", "using_cuda12_arm": "false"},
+    name = "cuda_pre_12_8",
+    define_values = {"using_cuda12_8_x86": "false", "using_cuda12_9_x86": "false", "using_cuda12_arm": "false"},
 )
 
 config_setting(

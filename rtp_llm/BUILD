@@ -234,7 +234,7 @@ py_library(
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": tensorrt,
-        "@//:cuda_pre_12_9": tensorrt,
+        "@//:cuda_pre_12_8": tensorrt,
         "//conditions:default": []
     }) +
     select({
