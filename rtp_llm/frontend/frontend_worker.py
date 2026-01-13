@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import pathlib
@@ -7,17 +8,24 @@ import traceback
 from functools import partial
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 
-from rtp_llm.config.py_config_modules import StaticConfig
-
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
 
+from dataclasses import asdict
+
 from pydantic import BaseModel
 
+from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.model_config import (
+    update_stop_words_from_env,
+    update_tokenizer_special_tokens,
+)
+from rtp_llm.distribute.distributed_server import WorldInfo, get_world_info
+from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info, g_worker_info
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
-from rtp_llm.model_factory import ModelFactory
+from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
 from rtp_llm.utils.base_model_datatypes import GenerateResponse
@@ -54,17 +62,91 @@ class TokenizerEncodeResponse(BaseModel):
     error: str = ""
 
 
-class FrontendWorker:
-    def __init__(self, separated_frontend: bool) -> None:
-        logging.info("starting frontend worker")
-        self.model_config = ModelFactory.create_frontend_config(
-            ModelFactory.create_normal_model_config()
+def get_dp_addrs_from_world_info(
+    world_info: WorldInfo, parallelism_config: ParallelismConfig
+) -> list[str]:
+    """Get data parallel addresses from world_info.
+
+    Args:
+        world_info: WorldInfo containing all worker members
+        parallelism_config: ParallelismConfig containing parallelism configuration
+        address: Optional address to use when dp_size == 1 (defaults to localhost:rpc_server_port)
+
+    Returns:
+        List of RPC addresses for data parallel communication
+    """
+    addresses = []
+
+    ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
+    # If FFN disaggregate is enabled, limit addresses to serving ranks
+    if ffn_disaggregate_config.enable_ffn_disaggregate:
+        serving_ranks = (
+            ffn_disaggregate_config.attention_tp_size
+            * ffn_disaggregate_config.attention_dp_size
         )
-        self.tokenizer = TokenizerFactory.create_from_env()
-        self.model_config.update_task_prompt_tokens_id(self.tokenizer)
-        self.model_config.update_tokenizer_special_tokens(self.tokenizer)
-        self.pipeline = Pipeline(self.model_config, self.tokenizer, separated_frontend)
+        members = world_info.members[:serving_ranks]
+        logging.info(
+            f"FFN disaggregate enabled, limiting addresses to {serving_ranks} serving ranks: {members}"
+        )
+    else:
+        # Get all addresses from world_info members with tp_rank == 0
+        members = [
+            member
+            for member in world_info.members
+            if (member.world_rank % parallelism_config.tp_size) == 0
+        ]
+
+    addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
+    logging.info(
+        f"[world_rank: {parallelism_config.world_rank}] "
+        f"using addresses from world_info: {addresses}"
+    )
+
+    return addresses
+
+
+class FrontendWorker:
+    def __init__(self, py_env_configs, model_config, special_tokens) -> None:
+        logging.info("starting frontend worker")
+
+        self.tokenizer = TokenizerFactory.create(
+            model_config.ckpt_path, model_config.tokenizer_path, model_config.model_type
+        )
+
+        # Create engine_config with world_info
+        engine_config = EngineConfig.create(py_env_configs)
+
+        # Get world_info from distribute_config
+        world_info = get_world_info(
+            server_config=py_env_configs.server_config,
+            distribute_config=py_env_configs.distribute_config,
+        )
+
+        # Get addresses from distribute_info
+        addresses = get_dp_addrs_from_world_info(
+            world_info=world_info,
+            parallelism_config=engine_config.parallelism_config,
+        )
+
+        vit_separation = None
+        if py_env_configs.vit_config:
+            vit_separation = py_env_configs.vit_config.vit_separation
+
+        self.pipeline = Pipeline(
+            special_tokens=special_tokens,
+            pd_sep_config=engine_config.pd_sep_config,
+            addresses=addresses,
+            max_seq_len=model_config.max_seq_len,
+            seq_size_per_block=model_config.attn_config.tokens_per_block,
+            tokenizer=self.tokenizer,
+            sp_config=py_env_configs.sp_config,
+            mm_related_params=None,  # Frontend doesn't need mm_related_params
+            grpc_config=py_env_configs.grpc_config,
+            vit_separation=vit_separation,
+        )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
+        self.generate_env_config = py_env_configs.generate_env_config
+
         logging.info("frontend worker start done.")
 
     def tokenizer_offset_mapping(self, prompt: str) -> Any:
@@ -141,19 +223,20 @@ class FrontendWorker:
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         finished = gen_responses.generate_outputs.generate_outputs[0].finished
-        aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
+        if generate_config.aux_info:
+            aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
+            if generate_config.has_num_beams():
+                aux_info.beam_responses = generate_texts
         hidden_states = gen_responses.generate_outputs.generate_outputs[0].hidden_states
         output_ids = gen_responses.generate_outputs.generate_outputs[0].output_ids
         input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids
         loss = gen_responses.generate_outputs.generate_outputs[0].loss
         logits = gen_responses.generate_outputs.generate_outputs[0].logits
 
-        if generate_config.has_num_beams():
-            aux_info.beam_responses = generate_texts
         response = PipelineResponse(
             response=generate_texts[0],
             finished=finished,
-            aux_info=aux_info.model_dump(mode="json"),
+            aux_info=asdict(aux_info) if generate_config.aux_info else {},
             hidden_states=(
                 hidden_states.tolist()
                 if generate_config.return_hidden_states and hidden_states is not None
@@ -188,6 +271,12 @@ class FrontendWorker:
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         if generate_config.num_return_sequences > 0:
+            aux_info = []
+            if generate_config.aux_info:
+                aux_info = [
+                    asdict(seq.aux_info)
+                    for seq in gen_responses.generate_outputs.generate_outputs
+                ]
             sequences_pipeline_response = MultiSequencesPipelineResponse(
                 response=generate_texts,
                 finished=all(
@@ -196,10 +285,7 @@ class FrontendWorker:
                         for seq in gen_responses.generate_outputs.generate_outputs
                     ]
                 ),
-                aux_info=[
-                    seq.aux_info.model_dump(mode="json")
-                    for seq in gen_responses.generate_outputs.generate_outputs
-                ],
+                aux_info=aux_info,
             )
             return sequences_pipeline_response
         else:
@@ -218,6 +304,7 @@ class FrontendWorker:
             request_id=request_id,
             urls=urls,
             generate_config=generate_config,
+            generate_env_config=self.generate_env_config,
             **kwargs,
         )
         async for generate_response in stream:
@@ -225,7 +312,6 @@ class FrontendWorker:
 
     def is_streaming(self, req: Dict[str, Any]):
         return RequestExtractor.is_streaming(req) or req.get("stream", False)
-
 
     async def _parallel_batch_async_generators(
         self,

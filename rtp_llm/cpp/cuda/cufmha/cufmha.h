@@ -5,6 +5,7 @@
 #include "3rdparty/contextFusedMultiHeadAttentionSm70/fmhaRunner.h"
 #include "3rdparty/contextFusedMultiHeadAttention/fused_multihead_attention_common.h"
 #include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
+#include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/devices/DeviceData.h"
 
@@ -13,9 +14,9 @@ namespace rtp_llm {
 class cufmha {
 
 public:
-    cufmha(DataType          dtype,
-           AttentionMaskType mtype,
-           size_t            head_num,
+    cufmha(DataType dtype,
+           bool     is_causal,
+           size_t   head_num,
            size_t            kv_head_num,
            size_t            size_per_head,
            size_t            seq_size_per_block,
@@ -36,7 +37,7 @@ public:
     }
 
     bool trtV2FmhaSupport() {
-        return support_trt_v2_fhma_;
+        return support_trt_v2_fmha_;
     }
 
     bool trtV2FmhaPagedSupport() {
@@ -111,47 +112,20 @@ public:
     size_t
     getOpenSourceWorkSpaceSize(size_t batch_size, size_t seq_len_q, size_t max_seq_len_kv = 0, bool paged = false);
 
-    bool checkSignature(DataType          dtype,
-                        AttentionMaskType mtype,
-                        size_t            head_num,
+    bool checkSignature(DataType dtype,
+                        bool     is_causal,
+                        size_t   head_num,
                         size_t            kv_head_num,
                         size_t            size_per_head,
                         float             q_scaling,
                         bool              use_linear_bias_slopes);
-    // for cuda graph batch prefill test
-    bool getIsPadded() {
-        return is_s_padded_;
-    }
-
-    // for cuda graph batch prefill test
-    void setIsPadded(bool is_s_padded);
 
 private:
     cudaStream_t getStream();
 
     bool initTrtV1FmhaAndCheckSupport();
 
-    bool initTrtV2FmhaAndCheckSupport();
-
-    bool initTrtV2FmhaPagedAndCheckSupport();
-
-    bool initOpenSourceFmhaAndCheckSupport();
-
-    tensorrt_llm::kernels::MHARunnerFixedParams createMHARunnerFixedParams(bool paged, bool isSPadded = false);
-    tensorrt_llm::kernels::MHARunnerParams      createMHARunnerParams(void*        input,
-                                                                      void*        cu_seqlens,
-                                                                      void*        cu_kv_seqlens,
-                                                                      void*        output,
-                                                                      uint32_t*    tile_counter_ptr,
-                                                                      float*       attention_output_orig_quant_scale,
-                                                                      size_t       batch_size,
-                                                                      size_t       max_input_length,
-                                                                      size_t       max_kv_length,
-                                                                      size_t       total_q_seq_len,
-                                                                      size_t       total_kv_seq_len,
-                                                                      KVBlockArray kv_block_array,
-                                                                      void*        custom_mask = nullptr);
-    static int                                  roundMultiple(int x, int m) {
+    static int roundMultiple(int x, int m) {
         return (x + m - 1) / m * m;
     }
 
@@ -170,15 +144,15 @@ private:
                                        float* linear_bias_slopes  = nullptr,
                                        float  softmax_extra_scale = 1.0f) const;
 
+    bool initOpenSourceFmhaAndCheckSupport();
+
 private:
-    std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2>     trtv2_fmha_runner_;
-    std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2>     trtv2_paged_fmha_runner_;
-    std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2Sm70> trtv2_sm70_fmha_runner_;
+    std::shared_ptr<TrtV2FmhaRunner> trtv2_runner_;
 #ifdef USE_OLD_TRT_FMHA
     std::unique_ptr<FusedMHARunnerFP16v2> trtv1_fmha_runner_;
 #endif
-    DataType          dtype_;
-    AttentionMaskType mtype_;
+    DataType dtype_;
+    bool     is_causal_;
 
     size_t       head_num_;
     size_t       kv_head_num_;
@@ -188,7 +162,7 @@ private:
     float        q_scaling_;
     bool         use_linear_bias_slopes_;
     bool         support_trt_v1_fmha_;
-    bool         support_trt_v2_fhma_;
+    bool         support_trt_v2_fmha_;
     bool         support_trt_v2_paged_fmha_;
     bool         support_open_source_fmha_;
     bool         is_s_padded_{false};

@@ -15,7 +15,7 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
     }
     initLocalHostInfo();
     initLocalPeerInfo();
-    initCacheStore(maga_init_params.gpt_init_parameter, propose_params_ptr);
+    initCacheStore(maga_init_params, propose_params_ptr);
     return grpc::Status::OK;
 }
 
@@ -36,50 +36,49 @@ void RemoteRpcServer::initLocalHostInfo() {
 
 void RemoteRpcServer::initLocalPeerInfo() {
     // not init when tp rank != 0
-    if (maga_init_params_.gpt_init_parameter.tp_rank_ > 0) {
+    if (maga_init_params_.parallelism_config.tp_rank > 0) {
         return;
     }
     // worker 0 is master (rank 0)
-    for (auto& worker_addr : maga_init_params_.gpt_init_parameter.worker_addrs_) {
-        RTP_LLM_LOG_INFO("In gpt init params: worker address is %s", worker_addr.c_str());
-        resource_.workers.push_back(worker_addr);
-    }
-    for (auto& worker_grpc_addr : maga_init_params_.gpt_init_parameter.worker_grpc_addrs_) {
-        RTP_LLM_LOG_INFO("In gpt init params: worker grpc address is %s", worker_grpc_addr.c_str());
-        resource_.grpc_workers.push_back(worker_grpc_addr);
-    }
+    resource_.workers      = maga_init_params_.runtime_config.worker_addrs;
+    resource_.grpc_workers = maga_init_params_.runtime_config.worker_grpc_addrs;
+
     string worker_info = "worker address is ";
     for (auto& worker : resource_.workers) {
         worker_info += worker + ", ";
     }
-    RTP_LLM_LOG_INFO(worker_info);
+    RTP_LLM_LOG_INFO("%s", worker_info.c_str());
 
     string worker_grpc_info = "worker grpc address is ";
     for (auto& worker : resource_.grpc_workers) {
         worker_grpc_info += worker + ", ";
     }
-    RTP_LLM_LOG_INFO(worker_grpc_info);
+    RTP_LLM_LOG_INFO("%s", worker_grpc_info.c_str());
 }
 
-void RemoteRpcServer::initCacheStore(const GptInitParameter&                init_params,
+void RemoteRpcServer::initCacheStore(const EngineInitParams&                init_params,
                                      rtp_llm::ProposeModelEngineInitParams* propose_params) {
-    RTP_LLM_LOG_INFO("init_params.role_type : %d", init_params.role_type_);
+    RTP_LLM_LOG_INFO("init_params.role_type : %d", init_params.pd_sep_config.role_type);
 
-    if (init_params.role_type_ != RoleType::PREFILL && init_params.role_type_ != RoleType::DECODE) {
-        RTP_LLM_FAIL("role_type must be prefill or decode, but it is %d", init_params.role_type_);
+    if (init_params.pd_sep_config.role_type != RoleType::PREFILL
+        && init_params.pd_sep_config.role_type != RoleType::DECODE) {
+        RTP_LLM_FAIL("role_type must be prefill or decode, but it is %d", init_params.pd_sep_config.role_type);
     }
-    const_cast<ResourceContext*>(&engine_->resourceContext())->use_cache_store = true;
-    auto device                                                                = engine_->getDevice();
+    auto device        = engine_->getDevice();
     auto cache_manager = engine_->resourceContext().cache_manager;
 
     CacheStoreInitParams params;
-    params.listen_port                  = init_params.cache_store_listen_port_;
-    params.rdma_listen_port             = init_params.cache_store_rdma_listen_port_;
-    params.rdma_mode                    = init_params.cache_store_rdma_mode_;
+    params.listen_port                  = init_params.pd_sep_config.cache_store_listen_port;
+    params.rdma_listen_port             = init_params.pd_sep_config.cache_store_rdma_listen_port;
+    params.rdma_mode                    = init_params.pd_sep_config.cache_store_rdma_mode;
     params.thread_count                 = init_params.cache_store_config.thread_count;
     params.queue_size                   = 500;
     params.rdma_connect_timeout_ms      = init_params.cache_store_config.rdma_connect_timeout_ms;
     params.rdma_qp_count_per_connection = init_params.cache_store_config.rdma_qp_count_per_connection;
+    params.rdma_io_thread_count         = init_params.cache_store_config.rdma_io_thread_count;
+    params.rdma_worker_thread_count     = init_params.cache_store_config.rdma_worker_thread_count;
+    params.messager_io_thread_count     = init_params.cache_store_config.messager_io_thread_count;
+    params.messager_worker_thread_count = init_params.cache_store_config.messager_worker_thread_count;
     params.device                       = device;
     params.metrics_reporter             = metrics_reporter_;
     RTP_LLM_LOG_INFO("cache store listen port is [%ld], rdma listen port is [%ld] rdma_mode is [%d]",
@@ -92,15 +91,6 @@ void RemoteRpcServer::initCacheStore(const GptInitParameter&                init
 
     device->setCacheStore(cache_store_);
     cache_manager->regUserMr(maga_init_params_.model_id);
-    if (propose_params) {
-        if (propose_params->mtp_model_params_) {
-            for (size_t mtp_model_id = 0; mtp_model_id < propose_params->mtp_model_params_->size(); mtp_model_id++) {
-                const std::shared_ptr<CacheManager>& mtp_cache_manager =
-                    engine_->resourceContext().mtp_cache_managers[mtp_model_id];
-                mtp_cache_manager->regUserMr(propose_params->mtp_model_params_->at(mtp_model_id)->model_id);
-            }
-        }
-    }
 
     resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }

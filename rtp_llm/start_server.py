@@ -1,4 +1,3 @@
-import argparse
 import logging
 import multiprocessing
 import os
@@ -8,78 +7,125 @@ import traceback
 
 import requests
 
-from rtp_llm.config.py_config_modules import ServerConfig, StaticConfig
-from rtp_llm.metrics import kmonitor
-from rtp_llm.ops import ProfilingDebugLoggingConfig
-from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
+from rtp_llm.distribute.distributed_server import get_world_info
+from rtp_llm.utils.time_util import timer_wrapper
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
-from rtp_llm.server.server_args.server_args import EnvArgumentParser, setup_args
+from rtp_llm.config.log_config import setup_logging
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config_setup import setup_and_configure_server
+from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info, update_worker_info
+from rtp_llm.ops import RoleType
+from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
+from rtp_llm.utils.process_manager import ProcessManager
 
+setup_logging()
 
 def check_server_health(server_port):
     try:
         response = requests.get(f"http://localhost:{server_port}/health", timeout=60)
-        logging.info(
-            f"response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
-        )
-        if response.status_code == 200 and response.text.strip() == '"ok"':
+        if response.status_code == 200 and response.json().get("status", "") == "ok":
+            logging.info(
+                f"{server_port}/health, response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
+            )
             return True
         else:
-            logging.info(f"health check is not ready")
             return False
     except BaseException as e:
-        logging.debug("health check is not ready, %s", str(e))
         return False
 
 
-def start_backend_server_impl(global_controller):
+@timer_wrapper(description="start backend server")
+def start_backend_server_impl(
+    global_controller,
+    py_env_configs: PyEnvConfigs,
+    process_manager: ProcessManager = None,
+):
     from rtp_llm.start_backend_server import start_backend_server
 
-    profiling_debug_config = ProfilingDebugLoggingConfig()
-    profiling_debug_config.update_from_env()
     # only for debug
-    if profiling_debug_config.debug_load_server:
-        start_backend_server(global_controller)
+    if py_env_configs.profiling_debug_logging_config.debug_load_server:
+        start_backend_server(global_controller, py_env_configs, None)
         os._exit(-1)
+
+    # Create pipe for subprocess startup status communication
+    pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
+    logging.info(f"[PROCESS_SPAWN]Start backend server process outer")
+
     backend_process = multiprocessing.Process(
-        target=start_backend_server, args=(global_controller,), name="backend_server"
+        target=start_backend_server,
+        args=(global_controller, py_env_configs, pipe_writer),
+        name="backend_manager",
     )
     backend_process.start()
+    pipe_writer.close()  # Parent process closes write end
 
-    retry_interval_seconds = 5
-    server_config = ServerConfig()
-    server_config.update_from_env()
-    start_port = server_config.start_port
-    backend_server_port = WorkerInfo.backend_server_port_offset(0, start_port)
-    while True:
-        if not backend_process.is_alive():
-            monitor_and_release_process(backend_process, None)
-            raise Exception("backend server is not alive")
+    # Create check_ready_fn for pipe-based health check
+    max_wait_seconds = 60 * 60
+    startup_status = {"ready": False, "error": None}
 
-        try:
-            if check_server_health(backend_server_port):
-                logging.info(f"backend server is ready")
-                break
-            else:
-                time.sleep(retry_interval_seconds)
-        except Exception as e:
-            logging.info(f"backend server is not ready")
-            time.sleep(retry_interval_seconds)
+    def check_backend_ready():
+        """Check if backend server is ready via pipe communication"""
+        if startup_status["ready"]:
+            return True
+
+        if startup_status["error"]:
+            raise Exception(startup_status["error"])
+
+        # Non-blocking check if data is available
+        if pipe_reader.poll(timeout=0):
+            try:
+                status_msg = pipe_reader.recv()
+                if status_msg.get("status") == "success":
+                    logging.info(
+                        f"Backend server started successfully: {status_msg.get('message', '')}"
+                    )
+                    startup_status["ready"] = True
+                    pipe_reader.close()
+                    return True
+                else:
+                    # Startup failed
+                    error_msg = status_msg.get("message", "Unknown error")
+                    traceback_info = status_msg.get("traceback", "")
+                    if traceback_info:
+                        logging.error(f"Traceback: {traceback_info}")
+
+                    error = f"Backend server start failed: {error_msg}"
+                    startup_status["error"] = error
+                    pipe_reader.close()
+                    raise Exception(error)
+            except EOFError:
+                error = "Backend server pipe closed unexpectedly"
+                startup_status["error"] = error
+                pipe_reader.close()
+                raise Exception(error)
+
+        return False
+
+    # Register health check with ProcessManager using custom check_ready_fn
+    if process_manager:
+        process_manager.register_health_check(
+            processes=[backend_process],
+            process_name="backend_server",
+            check_ready_fn=check_backend_ready,
+            retry_interval_seconds=0.1,
+        )
 
     return backend_process
 
 
-def start_frontend_server_impl(global_controller, backend_process):
+@timer_wrapper(description="start frontend server")
+def start_frontend_server_impl(
+    global_controller,
+    py_env_configs: PyEnvConfigs,
+    process_manager=None,
+):
     from rtp_llm.start_frontend_server import start_frontend_server
 
-    server_config = ServerConfig()
-    server_config.update_from_env()
-    frontend_server_count = server_config.frontend_server_count
+    frontend_server_count = py_env_configs.server_config.frontend_server_count
     if frontend_server_count < 1:
         logging.info(
             "frontend server's count is {frontend_server_count}, this may be a mistake"
@@ -101,115 +147,103 @@ def start_frontend_server_impl(global_controller, backend_process):
 
     for rank in range(local_world_size):
         for i in range(frontend_server_count):
+            logging.info(
+                f"[PROCESS_SPAWN]Start frontend server process rank_{rank}_server_{i} outer"
+            )
             process = multiprocessing.Process(
                 target=start_frontend_server,
-                args=(rank, i, global_controller),
+                args=(rank, i, global_controller, py_env_configs),
                 name=f"frontend_server_{i}",
             )
             frontend_processes.append(process)
             process.start()
 
-    retry_interval_seconds = 5
-    start_port = server_config.start_port
+    if process_manager and frontend_processes:
+        # Register health check with ProcessManager for the first frontend server
+        def check_frontend_ready():
+            return check_server_health(py_env_configs.server_config.start_port)
 
-    while True:
-        if not all(proc.is_alive() for proc in frontend_processes):
-            monitor_and_release_process(backend_process, frontend_processes)
-            raise Exception("frontend server is not alive")
-
-        try:
-            check_server_health(start_port)
-            logging.info(f"frontend server is ready")
-            break
-        except Exception as e:
-            # 如果连接失败，等待一段时间后重试
-            time.sleep(retry_interval_seconds)
+        process_manager.register_health_check(
+            processes=frontend_processes,
+            process_name="frontend_server",
+            check_ready_fn=check_frontend_ready,
+            retry_interval_seconds=0.1,
+        )
 
     return frontend_processes
 
 
-def monitor_and_release_process(backend_process, frontend_process):
-    all_process = []
-    if backend_process:
-        all_process.append(backend_process)
-    if frontend_process:
-        all_process.extend(frontend_process)
-    logging.info(f"all process = {all_process}")
-
-    while any(proc.is_alive() for proc in all_process):
-        if not all(proc.is_alive() for proc in all_process):
-            logging.error(f"server monitor : some process is not alive, exit!")
-            for proc in all_process:
-                try:
-                    proc.terminate()
-                except Exception as e:
-                    logging.error(f"catch exception when process terminate : {str(e)}")
-        time.sleep(1)
-    [proc.join() for proc in all_process]
-
-    logging.info("all process exit")
-
-
-def get_model_type_and_update_env(parser: EnvArgumentParser, args: argparse.Namespace):
-    if (
-        hasattr(args, "checkpoint_path")
-        and args.checkpoint_path is not None
-        and args.checkpoint_path != ""
-    ):
-        model_path = args.checkpoint_path
-        current_model_type = os.environ.get(
-            "MODEL_TYPE", StaticConfig.model_config.model_type
-        )
-        if current_model_type is None or current_model_type == "":
-            if (
-                hasattr(args, "model_type")
-                and args.model_type is not None
-                and args.model_type != ""
-            ):
-                config_model_type = args.model_type
-            else:
-                model_info = get_hf_model_info(model_path)
-                config_model_type = model_info.ft_model_type
-                setattr(args, "model_type", config_model_type)
-            if config_model_type is not None and config_model_type != "":
-                EnvArgumentParser.update_env_from_args(parser, "model_type", args)
-    StaticConfig.update_from_env()
-
-
 def main():
-    parser, args = setup_args()
+    py_env_configs: PyEnvConfigs = setup_args()
+    setup_and_configure_server(py_env_configs)
+    start_server(py_env_configs)
 
-    start_server(parser, args)
 
-
-def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
+def start_server(py_env_configs: PyEnvConfigs):
+    logging.info(f"[PROCESS_START]Start server")
+    start_time = time.time()
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
-        logging.warn(str(e))
-    global_controller = init_controller()
+        logging.warning(str(e))
+
+    global_controller = init_controller(
+        py_env_configs.concurrency_config, dp_size=g_parallel_info.dp_size
+    )
+
+    # Create process manager with config values
+    process_manager = ProcessManager(
+        shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
+        monitor_interval=py_env_configs.server_config.monitor_interval,
+    )
+
+    # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
-    frontend_process = None
-    get_model_type_and_update_env(parser, args)
+    # Get number of nodes
     try:
-        if os.environ.get("ROLE_TYPE", "") != "FRONTEND":
+        world_info = get_world_info(
+            py_env_configs.server_config, py_env_configs.distribute_config
+        )
+        num_nodes = world_info.num_nodes
+    except Exception:
+        # If get_world_info fails, estimate from world_size
+        # Assuming 8 GPUs per node
+        num_nodes = (g_parallel_info.world_size + 7) // 8
+        logging.info(
+            f"Failed to get world_info, estimated num_nodes={num_nodes} from world_size={g_parallel_info.world_size}"
+        )
+
+    try:
+        if py_env_configs.role_config.role_type != RoleType.FRONTEND:
             logging.info("start backend server")
-            backend_process = start_backend_server_impl(global_controller)
-            logging.info(f"backend server process = {backend_process}")
+            backend_process = start_backend_server_impl(
+                global_controller, py_env_configs, process_manager
+            )
+            process_manager.add_process(backend_process)
 
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(
-            global_controller, backend_process
+            global_controller, py_env_configs, process_manager
         )
-        logging.info(f"frontend server process = {frontend_process}")
+        process_manager.add_processes(frontend_process)
 
-        logging.info(f"后端RPC 服务监听的ip为 0.0.0.0，ip/ip段可自定义为所需范围")
+        # Start parallel health checks and wait for completion
+        if not process_manager.run_health_checks():
+            logging.error("Health checks failed")
+            raise Exception("Health checks failed")
+
+        logging.info(
+            f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
+        )
+        consume_s = time.time() - start_time
+        logging.info(f"start server took {consume_s:.2f}s")
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
+        # Trigger graceful shutdown on any exception
+        process_manager.graceful_shutdown()
     finally:
-        monitor_and_release_process(backend_process, frontend_process)
+        process_manager.monitor_and_release_processes()
 
 
 if __name__ == "__main__":
-    os.makedirs("logs", exist_ok=True)
     main()

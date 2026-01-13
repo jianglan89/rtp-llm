@@ -5,20 +5,19 @@
 #include "rtp_llm/cpp/api_server/SysCmdService.h"
 #include "rtp_llm/cpp/api_server/TokenizerService.h"
 #include "rtp_llm/cpp/api_server/Exception.h"
-#include "rtp_llm/cpp/api_server/GangServer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
-void HttpApiServer::init_controller(const rtp_llm::GptInitParameter& params) {
-    bool block = params.concurrency_config.concurrency_with_block;
-    RTP_LLM_LOG_INFO("Get concurrency_with_block: %d from GptInitParameter.",
-                     params.concurrency_config.concurrency_with_block);
-    if (params.tp_rank_ == 0) {
-        int limit = params.concurrency_config.concurrency_limit;
+void HttpApiServer::init_controller(const ConcurrencyConfig& concurrency_config, const ParallelismConfig& parallelism_config) {
+    bool block = concurrency_config.concurrency_with_block;
+    RTP_LLM_LOG_INFO("Get concurrency_with_block: %d from ConcurrencyConfig.",
+                     concurrency_config.concurrency_with_block);
+    if (parallelism_config.tp_rank == 0) {
+        int limit = concurrency_config.concurrency_limit;
         RTP_LLM_LOG_INFO("CONCURRENCY_LIMIT to %d", limit);
         controller_ = std::make_shared<ConcurrencyController>(limit, block);
-    } else /* if (params.tp_size_ != 1) */ {
+    } else /* if (parallelism_config.tp_size != 1) */ {
         RTP_LLM_LOG_INFO("use gang cluster and is worker, set CONCURRENCY_LIMIT to 99");
         controller_ = std::make_shared<ConcurrencyController>(99, block);
     }
@@ -56,14 +55,12 @@ bool HttpApiServer::start() {
 
 bool HttpApiServer::start(py::object model_weights_loader,
                           py::object lora_infos,
-                          py::object gang_info,
+                          py::object world_info,
                           py::object tokenizer,
                           py::object render) {
     if (lora_infos.is_none() == false) {
         lora_infos_ = lora_infos.cast<std::map<std::string, std::string>>();
     }
-    weights_loader_.reset(new WeightsLoader(model_weights_loader));
-    gang_server_.reset(new GangServer(gang_info));
     tokenizer_.reset(new Tokenizer(tokenizer));
     if (render.is_none() == false) {
         render_.reset(new ChatRender(render));
@@ -124,13 +121,6 @@ bool HttpApiServer::registerServices() {
     // POST / /v1/embeddings /v1/embeddings/similarity /v1/classifier /v1/rerank
     if (is_embedding_ && !registerEmbedingService()) {
         RTP_LLM_LOG_WARNING("HttpApiServer register embeding service failed.");
-        return false;
-    }
-
-    // add uri:
-    // POST: //add_lora_internal /remove_lora_internal /update
-    if (!registerLoraService()) {
-        RTP_LLM_LOG_WARNING("HttpApiServer register lora service failed.");
         return false;
     }
 
@@ -210,7 +200,7 @@ bool HttpApiServer::registerTokenizerService() {
 
 bool HttpApiServer::registerChatService() {
     chat_service_.reset(
-        new ChatService(engine_, mm_processor_, request_counter_, tokenizer_, render_, params_, metric_reporter_));
+        new ChatService(engine_, mm_processor_, request_counter_, tokenizer_, render_, params_.model_config_, metric_reporter_));
     auto chat_completions_callback = [active_request_count = active_request_count_,
                                       chat_service         = chat_service_,
                                       controller           = controller_,
@@ -267,7 +257,7 @@ bool HttpApiServer::registerInferenceService() {
         return false;
     }
     inference_service_.reset(new InferenceService(
-        engine_, mm_processor_, request_counter_, token_processor_, controller_, params_, metric_reporter_));
+        engine_, mm_processor_, request_counter_, token_processor_, controller_, params_.model_config_, metric_reporter_));
     auto inference_internal_callback =
         [active_request_count = active_request_count_, inference_service = inference_service_](
             std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
@@ -321,63 +311,6 @@ bool HttpApiServer::registerEmbedingService() {
            && http_server_->RegisterRoute("POST", "/v1/classifier", callback)
            && http_server_->RegisterRoute("POST", "/v1/reranker", callback)
            && http_server_->RegisterRoute("POST", "/", callback);
-}
-
-bool HttpApiServer::registerLoraService() {
-    lora_service_.reset(new LoraService(engine_, gang_server_, weights_loader_, lora_infos_, metric_reporter_));
-    auto add_lora_internal_callback =
-        [lora_service = lora_service_, request_counter = request_counter_, metric_reporter = metric_reporter_](
-            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
-        auto request_id = request_counter->incAndReturn();
-        try {
-            lora_service->addLoraInternal(writer, request);
-        } catch (const py::error_already_set& e) {
-            RTP_LLM_LOG_WARNING("add lora internal failed, found python exception: [%s]", e.what());
-            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
-            metric_reporter->reportErrorUpdateTargetQpsMetric();
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING("add lora internal failed, found cpp exception: [%s]", e.what());
-            metric_reporter->reportErrorUpdateTargetQpsMetric();
-            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
-        }
-    };
-
-    auto remove_lora_internal_callback =
-        [lora_service = lora_service_, request_counter = request_counter_, metric_reporter = metric_reporter_](
-            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
-        auto request_id = request_counter->incAndReturn();
-        try {
-            lora_service->removeLoraInternal(writer, request);
-        } catch (const py::error_already_set& e) {
-            RTP_LLM_LOG_WARNING("remove lora internal failed, found python exception: [%s]", e.what());
-            metric_reporter->reportErrorUpdateTargetQpsMetric();
-            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING("remove lora internal failed, found cpp exception: [%s]", e.what());
-            metric_reporter->reportErrorUpdateTargetQpsMetric();
-            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
-        }
-    };
-
-    auto update_callback =
-        [lora_service = lora_service_, request_counter = request_counter_, metric_reporter = metric_reporter_](
-            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
-        auto request_id = request_counter->incAndReturn();
-        try {
-            lora_service->update(writer, request);
-        } catch (const py::error_already_set& e) {
-            RTP_LLM_LOG_WARNING("update lora failed, found python exception: [%s]", e.what());
-            metric_reporter->reportErrorUpdateTargetQpsMetric();
-            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING("update lora failed, found cpp exception: [%s]", e.what());
-            metric_reporter->reportErrorUpdateTargetQpsMetric();
-            HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
-        }
-    };
-    return http_server_->RegisterRoute("POST", "/add_lora_internal", add_lora_internal_callback)
-           && http_server_->RegisterRoute("POST", "/remove_lora_internal", remove_lora_internal_callback)
-           && http_server_->RegisterRoute("POST", "/update", update_callback);
 }
 
 void HttpApiServer::stop() {

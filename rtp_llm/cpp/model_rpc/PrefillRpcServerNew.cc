@@ -99,8 +99,8 @@ bool PrefillRpcServerNew::validRequest(PrefillGenerateContextNew& prefill_contex
         return false;
     }
 
-    auto generate_stream = prefill_context.getStream();
-    auto block_ids       = generate_stream->kvCache().blocks(0);
+    auto  generate_stream = prefill_context.getStream();
+    auto& block_ids       = generate_stream->kvCachePtr()->blocks(0);
     if (block_ids.size() != request->block_ids_size()) {
         RTP_LLM_LOG_WARNING("request [%s] block_ids size [%d] not match request block_ids size [%d]",
                             prefill_context.request_key.c_str(),
@@ -114,17 +114,17 @@ bool PrefillRpcServerNew::validRequest(PrefillGenerateContextNew& prefill_contex
         return false;
     }
 
-    if (request->use_mla() != maga_init_params_.gpt_init_parameter.use_mla_) {
+    if (request->use_mla() != maga_init_params_.model_config_.attn_config.use_mla) {
         RTP_LLM_LOG_WARNING("request [%s] request is invalid, mla config not match",
                             prefill_context.request_key.c_str());
         return false;
     }
 
-    if (request->layer_num() != maga_init_params_.gpt_init_parameter.num_layers_) {
+    if (request->layer_num() != maga_init_params_.model_config_.num_layers) {
         RTP_LLM_LOG_WARNING("request [%s] request is invalid, layer_num %d vs %d not match",
                             prefill_context.request_key.c_str(),
                             request->layer_num(),
-                            maga_init_params_.gpt_init_parameter.num_layers_);
+                            maga_init_params_.model_config_.num_layers);
         return false;
     }
     return true;
@@ -175,7 +175,7 @@ ErrorInfo PrefillRpcServerNew::notifyStoreCache(PrefillGenerateContextNew& prefi
 
 void PrefillRpcServerNew::constructRemoteLoadRequest(PrefillGenerateContextNew& prefill_context, int index) {
     auto& request = prefill_context.rpc_contexts[index]->request;
-    request.set_dp_rank(maga_init_params_.gpt_init_parameter.dp_rank_);
+    request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_request_id(prefill_context.request_id);
     request.set_request_key(prefill_context.request_key);
     request.set_deadline_us(prefill_context.request->deadline_us());
@@ -184,7 +184,7 @@ void PrefillRpcServerNew::constructRemoteLoadRequest(PrefillGenerateContextNew& 
     for (int i = prefill_context.request->reuse_block_size(); i < prefill_context.request->block_ids_size(); i++) {
         request.add_decode_block_ids(prefill_context.request->block_ids(i));
     }
-    auto block_ids = prefill_context.getStream()->kvCache().blocks(0);
+    auto& block_ids = prefill_context.getStream()->kvCachePtr()->blocks(0);
     for (int i = prefill_context.request->reuse_block_size(); i < block_ids.size(); i++) {
         request.add_prefill_block_ids(block_ids[i]);
     }
@@ -252,8 +252,12 @@ ErrorInfo PrefillRpcServerNew::generateFirstToken(PrefillGenerateContextNew& pre
         }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", prefill_context.request_key.c_str());
         auto response_output = prefill_context.response->mutable_output();
-        QueryConverter::transResponse(
-            response_output, &(result.value()), maga_init_params_.gpt_init_parameter.misc_config.aux_string);
+
+        QueryConverter::transResponse(response_output,
+                                      &(result.value()),
+                                      stream->generateConfig()->aux_info,
+                                      maga_init_params_.misc_config.aux_string,
+                                      stream->specialTokens().eos_token_id);
         // should only generate one token
         break;
     }
@@ -288,7 +292,7 @@ ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateConte
 
         auto once_deadline =
             std::chrono::system_clock::now()
-            + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.decode_polling_kv_cache_step_ms_);
+            + std::chrono::milliseconds(maga_init_params_.pd_sep_config.decode_polling_kv_cache_step_ms);
         void* got_tag;
         bool  ok = false;
 
@@ -352,7 +356,7 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
                                               const RemoteStoreRequestPB* request,
                                               RemoteStoreResponsePB*      response) {
     RTP_LLM_LOG_DEBUG("request [%s] remote store", request->request_key().c_str());
-    if (request->dp_rank() != maga_init_params_.gpt_init_parameter.dp_rank_) {
+    if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "error dp rank");
     }
@@ -364,10 +368,9 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
 
     auto        cache_manager    = engine_->resourceContext().cache_manager;
     const auto& cache_config     = cache_manager->cacheConfig();
-    auto        k_block_size     = cache_config.k_block_stride;
-    auto        v_block_size     = cache_config.v_block_stride;
-    auto        scale_block_size = cache_config.kv_scale_block_stride;
-    auto        layer_num        = maga_init_params_.gpt_init_parameter.num_layers_;
+    auto        k_block_size     = cache_config.kv_block_stride_bytes;
+    auto        v_block_size     = cache_config.kv_block_stride_bytes;
+    auto        layer_num        = maga_init_params_.model_config_.num_layers;
 
     auto remote_addr_size = request->partition_infos_size();
     if (remote_addr_size == 0) {
@@ -375,13 +378,11 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
         return grpc::Status::OK;
     }
 
-    if (v_block_size % remote_addr_size != 0 || k_block_size % remote_addr_size != 0
-        || scale_block_size % remote_addr_size != 0) {
+    if (v_block_size % remote_addr_size != 0 || k_block_size % remote_addr_size != 0) {
         RTP_LLM_LOG_WARNING(
             "k block size [%d] or v block size [%d] or scale block size [%d] is not divisible by peer ips size [%d]",
             k_block_size,
             v_block_size,
-            scale_block_size,
             remote_addr_size);
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "block size is not divisible by peer ips size");
     }
@@ -422,19 +423,11 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
                 auto decode_block_key = makeCacheKey(model_id, std::to_string(request->decode_block_ids(i)), layer_id);
                 auto prefill_block_key =
                     makeCacheKey(model_id, std::to_string(request->prefill_block_ids(i)), layer_id);
-
-                auto addr_info = cache_manager->convertIndexToAddr(request->prefill_block_ids(i), layer_id);
                 store_request->buffer_pairs["k_" + prefill_block_key] = "k_" + decode_block_key;
-                if (addr_info.k_scale_addr) {
-                    store_request->buffer_pairs["k_scale_" + prefill_block_key] = "k_scale_" + decode_block_key;
-                }
                 if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
                     continue;
                 }
                 store_request->buffer_pairs["v_" + prefill_block_key] = "v_" + decode_block_key;
-                if (addr_info.v_scale_addr) {
-                    store_request->buffer_pairs["v_scale_" + prefill_block_key] = "v_scale_" + decode_block_key;
-                }
             }
         }
 

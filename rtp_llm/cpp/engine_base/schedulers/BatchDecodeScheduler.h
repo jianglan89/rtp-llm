@@ -3,6 +3,8 @@
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include <mutex>
 #include <condition_variable>
 #include <list>
@@ -23,14 +25,14 @@ public:
         kBatchDecode  = 0,
         kBatchPrefill = 1
     };
-    BatchDecodeScheduler(const rtp_llm::GptInitParameter&     params,
-                         const std::shared_ptr<CacheManager>& cache_manager,
-                         const kmonitor::MetricsReporterPtr   metrics_reporter,
-                         rtp_llm::DeviceBase*                 device) {
+    BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
+                         const std::shared_ptr<KVCacheManager>& cache_manager,
+                         const kmonitor::MetricsReporterPtr     metrics_reporter,
+                         rtp_llm::DeviceBase*                   device) {
         cache_manager_    = cache_manager;
         device_           = device;
         metrics_reporter_ = metrics_reporter;
-        batch_size_       = params.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+        batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
         scheduler_type_   = SchedulerType::kBatchDecode;
     }
     virtual ~BatchDecodeScheduler() = default;
@@ -78,16 +80,17 @@ public:
         RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
     }
 
-    void initRunningStreams() {
+    void initRunningStreams(size_t reserve_step) {
         // set kvcache block
         for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
+            (*it)->setPerfTest(true);
             // reset start time，to get more accurate avg token time
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
             // only set gen_timeline = True for first rank
             if (device_->getDeviceProperties().dp_rank != 0) {
                 (*it)->setGenTimeline(false);
             }
-            auto result = (*it)->initKVBlock(0, 0);
+            auto result = (*it)->initKVBlock(reserve_step);
             if (!result.ok()) {
                 (*it)->setStop(ErrorCode::MALLOC_FAILED,
                                "BatchDecodeScheduler::initRunningStreams: initKVBlock failed");
@@ -102,9 +105,9 @@ public:
         }
     }
 
-    void incrRunningStream() {
+    void incrRunningStream(size_t reserve_step) {
         for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-            auto result = (*it)->incrKVBlock(0, 0);
+            auto result = (*it)->incrKVBlock(reserve_step);
             if (!result.ok()) {
                 (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed");
                 RTP_LLM_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
@@ -117,7 +120,7 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(300), [this] {
+        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
             return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0;
         });
         if (running_streams_.size() == 0 && waiting_streams_.size() >= batch_size_) {
@@ -125,16 +128,16 @@ public:
             std::advance(it, batch_size_);
             running_streams_.insert(running_streams_.end(), waiting_streams_.begin(), it);
             waiting_streams_.erase(waiting_streams_.begin(), it);
-            initRunningStreams();
+            initRunningStreams(reserve_step);
             RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
                              running_streams_.size());
         } else {
-            incrRunningStream();
+            incrRunningStream(reserve_step);
         }
         evictAllDoneStreams();
         return running_streams_;
     }
-    
+
     absl::Status stop() override {
         // Not implemented
         return absl::UnimplementedError("BatchDecodeScheduler::stop not implemented");
@@ -159,14 +162,14 @@ private:
     std::condition_variable      cond_;
     std::list<GenerateStreamPtr> waiting_streams_;
     std::list<GenerateStreamPtr> running_streams_;
-    uint32_t batch_size_;
+    uint32_t                     batch_size_;
     bool                         reorder_request_;
-    uint32_t current_step_ = 0;
+    uint32_t                     current_step_ = 0;
 
-    std::shared_ptr<CacheManager> cache_manager_;
-    kmonitor::MetricsReporterPtr  metrics_reporter_;
-    rtp_llm::DeviceBase*          device_;
-    SchedulerType                 scheduler_type_;
+    std::shared_ptr<KVCacheManager> cache_manager_;
+    kmonitor::MetricsReporterPtr    metrics_reporter_;
+    rtp_llm::DeviceBase*            device_;
+    SchedulerType                   scheduler_type_;
 };
 
 }  // namespace rtp_llm

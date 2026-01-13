@@ -110,33 +110,49 @@ cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
 try:
     from libth_transformer_config import (
         ArpcConfig,
+        AttentionConfigs,
+        GrpcConfig,
         BatchDecodeSchedulerConfig,
         CacheStoreConfig,
         ConcurrencyConfig,
         DeviceResourceConfig,
-        EplbConfig,
         EplbMode,
         FfnDisAggregateConfig,
         FIFOSchedulerConfig,
         FMHAConfig,
         FMHAType,
-        GptInitParameter,
         HWKernelConfig,
         KVCacheConfig,
         MiscellaneousConfig,
         MlaOpsType,
+        ModelConfig,
         ModelSpecificConfig,
         MoeConfig,
-        ParallelismDistributedConfig,
+        PDSepConfig,
+        ParallelismConfig,
         ProfilingDebugLoggingConfig,
+        TaskType,
+        VitConfig,
+        VitSeparation,
+    )
+    # Alias for backward compatibility
+    from libth_transformer_config import (
         QuantAlgo,
         RoleType,
-        SamplerConfig,
-        SchedulerConfig,
-        ServiceDiscoveryConfig,
+        RuntimeConfig,
         SpecialTokens,
         SpeculativeExecutionConfig,
+        SpeculativeType,
+        EPLBConfig,
+        ActivationType,
+        KvCacheDataType,
+        ModelConfig,
+        HybridAttentionConfig,
+        HybridAttentionType,
+        LinearAttentionConfig
     )
+    # Alias for backward compatibility
+    EplbConfig = EPLBConfig
     from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,
     )
@@ -166,25 +182,25 @@ class EmptyClass:
     def __init__(self, **kwargs):
         pass
 
-
-frontend_mode = os.environ.get("ROLE_TYPE") == "FRONTEND"
-
 try:
     import librtp_compute_ops
+    from .compute_ops import rtp_llm_ops
+    # Export KVCache and other types from librtp_compute_ops
+    from librtp_compute_ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs, PyModelInitResources, PyCacheStoreInputs
 except BaseException as e:
-    if not frontend_mode:
-        logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
-        raise e
+    logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
+    rtp_llm_ops = EmptyClass
+    KVCache = PyAttentionInputs = PyModelInputs = PyModelOutputs = PyModelInitResources = PyCacheStoreInputs = EmptyClass
 
 try:
 
-    from libth_transformer import EngineScheduleInfo, KVCacheInfo
     from libth_transformer import MultimodalInput as MultimodalInputCpp
-    from libth_transformer import RtpEmbeddingOp, RtpLLMOp, WorkerStatusInfo
+    from libth_transformer import RtpEmbeddingOp, RtpLLMOp
+    from libth_transformer import EmbeddingCppOutput
 
     libth_transformer_imported = True
 except BaseException as e:
-    MultimodalInputCpp = EngineScheduleInfo = KVCacheInfo = WorkerStatusInfo = (
+    MultimodalInputCpp = EmbeddingCppOutput = (
         EmptyClass
     )
     RtpEmbeddingOp = RtpLLMOp = EmptyClass

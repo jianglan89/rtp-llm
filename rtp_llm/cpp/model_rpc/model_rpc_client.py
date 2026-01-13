@@ -1,13 +1,12 @@
 import functools
 import logging
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator
 
 import grpc
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     ErrorDetailsPB,
     GenerateInputPB,
@@ -16,8 +15,9 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
-from rtp_llm.distribute.gang_info import get_gang_info
+from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
+from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
@@ -25,6 +25,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
 )
+from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
@@ -191,73 +192,146 @@ def trans_multimodal_input(
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 
+# 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
+# from .utils import trans_tensor
+
+
 def trans_output(
     input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
 ) -> GenerateOutputs:
     logging.debug("outputs_pb = %s", outputs_pb)
+    output_pb = outputs_pb.flatten_output
+    num_outputs = len(output_pb.finished)
+
+    if num_outputs == 0:
+        return GenerateOutputs()
+
     logits_index = input_py.generate_config.logits_index
+    aux_info_flag = input_py.generate_config.aux_info
+
+    all_output_ids = (
+        trans_tensor(output_pb.output_ids)
+        if output_pb.HasField("output_ids")
+        and (len(output_pb.output_ids.shape) > 0 and output_pb.output_ids.shape[0] > 0)
+        else None
+    )
+    all_hidden_states = (
+        trans_tensor(output_pb.hidden_states)
+        if output_pb.HasField("hidden_states")
+        and len(output_pb.hidden_states.shape) > 0
+        and output_pb.hidden_states.shape[0] > 0
+        else None
+    )
+    all_all_hidden_states = (
+        trans_tensor(output_pb.all_hidden_states)
+        if output_pb.HasField("all_hidden_states")
+        and len(output_pb.all_hidden_states.shape) > 0
+        and output_pb.all_hidden_states.shape[0] > 0
+        else None
+    )
+    all_loss = (
+        trans_tensor(output_pb.loss)
+        if output_pb.HasField("loss")
+        and len(output_pb.loss.shape) > 0
+        and output_pb.loss.shape[0] > 0
+        else None
+    )
+    all_logits = (
+        trans_tensor(output_pb.logits)
+        if output_pb.HasField("logits")
+        and len(output_pb.logits.shape) > 0
+        and output_pb.logits.shape[0] > 0
+        else None
+    )
+    all_all_probs = (
+        trans_tensor(output_pb.all_probs)
+        if output_pb.HasField("all_probs")
+        and len(output_pb.all_probs.shape) > 0
+        and output_pb.all_probs.shape[0] > 0
+        else None
+    )
+
     outputs_py = GenerateOutputs()
-    for i, output_pb in enumerate(outputs_pb.generate_outputs):
+    input_token_ids = input_py.token_ids.reshape(1, -1)
+
+    # 遍历每个 beam/output
+    for i in range(num_outputs):
         output_py = GenerateOutput()
-        output_py.finished = output_pb.finished
-        output_py.aux_info = AuxInfo(
-            cost_time=output_pb.aux_info.cost_time_us / 1000.0,
-            first_token_cost_time=output_pb.aux_info.first_token_cost_time_us / 1000.0,
-            wait_time=output_pb.aux_info.wait_time_us / 1000.0,
-            iter_count=output_pb.aux_info.iter_count,
-            input_len=output_pb.aux_info.input_len,
-            prefix_len=output_pb.aux_info.prefix_len,
-            output_len=output_pb.aux_info.output_len,
-            step_output_len=output_pb.aux_info.step_output_len,
-            fallback_tokens=output_pb.aux_info.fallback_tokens,
-            fallback_times=output_pb.aux_info.fallback_times,
-            pd_sep=output_pb.aux_info.pd_sep,
-            reuse_len=output_pb.aux_info.total_reuse_len,
-            local_reuse_len=output_pb.aux_info.local_reuse_len,
-            remote_reuse_len=output_pb.aux_info.remote_reuse_len,
-            prefill_total_reuse_len=output_pb.aux_info.prefill_total_reuse_len,
-            prefill_local_reuse_len=output_pb.aux_info.prefill_local_reuse_len,
-            prefill_remote_reuse_len=output_pb.aux_info.prefill_remote_reuse_len,
-            decode_total_reuse_len=output_pb.aux_info.decode_total_reuse_len,
-            decode_local_reuse_len=output_pb.aux_info.decode_local_reuse_len,
-            decode_remote_reuse_len=output_pb.aux_info.decode_remote_reuse_len,
-            aux_string=output_pb.aux_info.aux_string,
-            role_addrs=input_py.generate_config.role_addrs,
-        )
-        # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
-        if output_pb.aux_info.HasField("cum_log_probs"):
-            output_py.aux_info.cum_log_probs = trans_tensor(
-                output_pb.aux_info.cum_log_probs
-            ).tolist()
-        if output_pb.aux_info.HasField("softmax_probs"):
-            output_py.aux_info.softmax_probs = trans_tensor(
-                output_pb.aux_info.softmax_probs
-            ).tolist()
-        output_py.output_ids = trans_tensor(output_pb.output_ids)
-        output_py.input_ids = input_py.token_ids.reshape(1, -1)
-        if output_pb.HasField("hidden_states"):
-            output_py.hidden_states = trans_tensor(output_pb.hidden_states)
-        if output_pb.HasField("all_hidden_states"):
-            output_py.all_hidden_states = trans_tensor(output_pb.all_hidden_states)
-        if output_pb.HasField("loss"):
-            # when calculate_loss 1, result should be one element
+        output_py.finished = output_pb.finished[i]
+        current_aux_info = None
+        if aux_info_flag and len(output_pb.aux_info) > i:
+            aux_info_pb = output_pb.aux_info[i]
+            current_aux_info = AuxInfo(
+                cost_time=aux_info_pb.cost_time_us / 1000.0,
+                first_token_cost_time=aux_info_pb.first_token_cost_time_us / 1000.0,
+                wait_time=aux_info_pb.wait_time_us / 1000.0,
+                iter_count=aux_info_pb.iter_count,
+                input_len=aux_info_pb.input_len,
+                prefix_len=aux_info_pb.prefix_len,
+                output_len=aux_info_pb.output_len,
+                step_output_len=aux_info_pb.step_output_len,
+                pd_sep=aux_info_pb.pd_sep,
+                reuse_len=aux_info_pb.total_reuse_len,
+                local_reuse_len=aux_info_pb.local_reuse_len,
+                remote_reuse_len=aux_info_pb.remote_reuse_len,
+                prefill_total_reuse_len=aux_info_pb.prefill_total_reuse_len,
+                prefill_local_reuse_len=aux_info_pb.prefill_local_reuse_len,
+                prefill_remote_reuse_len=aux_info_pb.prefill_remote_reuse_len,
+                decode_total_reuse_len=aux_info_pb.decode_total_reuse_len,
+                decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
+                decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
+                aux_string=aux_info_pb.aux_string,
+                role_addrs=input_py.generate_config.role_addrs,
+            )
+            if aux_info_pb.HasField("cum_log_probs"):
+                current_aux_info.cum_log_probs = trans_tensor(
+                    aux_info_pb.cum_log_probs
+                ).tolist()
+            if aux_info_pb.HasField("softmax_probs"):
+                current_aux_info.softmax_probs = trans_tensor(
+                    aux_info_pb.softmax_probs
+                ).tolist()
+
+            output_py.aux_info = current_aux_info
+
+        if all_output_ids is not None:
+            output_py.output_ids = all_output_ids[i]
+        output_py.input_ids = input_token_ids
+
+        if all_hidden_states is not None:
+            output_py.hidden_states = all_hidden_states[i]
+
+        if all_all_hidden_states is not None:
+            output_py.all_hidden_states = all_all_hidden_states[i]
+
+        if all_loss is not None:
+            loss_slice = all_loss[i]
             if input_py.generate_config.calculate_loss == 1:
-                output_py.loss = trans_tensor(output_pb.loss)[0]
+                output_py.loss = (
+                    loss_slice[0]
+                    if hasattr(loss_slice, "__len__") and len(loss_slice) > 0
+                    else loss_slice
+                )
             else:
-                output_py.loss = trans_tensor(output_pb.loss)
-        if output_pb.HasField("logits"):
-            output_py.logits = trans_tensor(output_pb.logits)
-        if output_pb.HasField("all_probs"):
-            output_py.all_probs = trans_tensor(output_pb.all_probs)
+                output_py.loss = loss_slice
+
+        if all_logits is not None:
+            output_py.logits = all_logits[i]
+
+        if all_all_probs is not None:
+            output_py.all_probs = all_all_probs[i]
+
         if (
             logits_index is not None
-            and output_pb.HasField("logits")
-            and output_pb.aux_info.output_len == logits_index
+            and all_logits is not None
+            and current_aux_info
+            and current_aux_info.output_len == logits_index
         ):
             stream_state.cached_logits_dict[i] = output_py.logits
 
         if output_py.finished and i in stream_state.cached_logits_dict:
             output_py.logits = stream_state.cached_logits_dict[i]
+
         outputs_py.generate_outputs.append(output_py)
 
     return outputs_py
@@ -265,46 +339,41 @@ def trans_output(
 
 class ModelRpcClient(object):
 
-    def __init__(self, config: GptInitModelParameters, address: Optional[str] = None):
-        # 创建到服务器的连接
-        if not address:
-            address = f"localhost:{g_worker_info.rpc_server_port}"
-        self._addresses = []
-        # for test usage
-        hack_ep_single_entry = config.py_env_configs.py_eplb_config.hack_ep_single_entry
-        logging.info(f"hack ep single entry: {hack_ep_single_entry}")
-        if (g_parallel_info.dp_size > 1) and (not hack_ep_single_entry):
-            members_info_str = (
-                f"[world_rank: {g_parallel_info.world_rank}]"
-                + f"[tp_size: {g_parallel_info.tp_size}] all members: "
-                + "{"
-            )
-            members = get_gang_info().members
-            for member in members:
-                members_info_str += f"{member}\n"
-                if member.local_rank % g_parallel_info.tp_size == 0:
-                    self._addresses.append(f"{member.ip}:{member.rpc_server_port}")
-            members_info_str += "}"
-            logging.info(f"{members_info_str}")
-        else:
-            self._addresses = [address]
-        # last rank as ffn service, no be entry
-        if config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate:
-            serving_ranks = (
-                config.gpt_init_params.ffn_disaggregate_config.attention_tp_size
-                * config.gpt_init_params.ffn_disaggregate_config.attention_dp_size
-            )
-            self._addresses = self._addresses[:serving_ranks]
-        logging.info(f"client connect to rpc addresses: {self._addresses}")
-        self.model_config = config
+    def __init__(
+        self,
+        addresses: list[str],
+        client_config,
+        max_rpc_timeout_ms: int = 0,
+        decode_entrance: bool = False,
+    ):
+        """Initialize ModelRpcClient with addresses.
+
+        Args:
+            addresses: List of RPC addresses for data parallel communication
+            max_rpc_timeout_ms: Maximum RPC timeout in milliseconds
+            decode_entrance: Whether this is a decode entrance
+        """
+        self._addresses = addresses
+        self._max_rpc_timeout_ms = max_rpc_timeout_ms
+        self._decode_entrance = decode_entrance
+        self._options = []
+        for key, value in client_config.items():
+            self._options.append((key, value))
+        logging.info(f"client options: {self._options}")
+
+        # Initialize the channel pool
+        self._channel_pool = GrpcHostChannelPool(
+            options=self._options, cleanup_interval=60  # clean up every minute
+        )
+        logging.info(f"addresses: {self._addresses}")
 
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
         request_timeout_ms = input_py.generate_config.timeout_ms
         rpc_timeout_ms = (
-            self.model_config.max_rpc_timeout_ms
-            if self.model_config.max_rpc_timeout_ms > 0
+            self._max_rpc_timeout_ms
+            if self._max_rpc_timeout_ms > 0
             else MAX_GRPC_TIMEOUT_SECONDS * 1000
         )
         if request_timeout_ms == None or request_timeout_ms <= 0:
@@ -320,36 +389,33 @@ class ModelRpcClient(object):
 
         for role_addr in input_py.generate_config.role_addrs:
             if (
-                (
-                    self.model_config.decode_entrance
-                    and role_addr.role == RoleType.DECODE
-                )
+                (self._decode_entrance and role_addr.role == RoleType.DECODE)
                 or role_addr.role == RoleType.PDFUSION
-                or (
-                    not self.model_config.decode_entrance
-                    and role_addr.role == RoleType.PREFILL
-                )
+                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
             ):
                 if role_addr.ip != "":
                     address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
                     break
 
+        if not address_list:
+            raise ValueError(f"No address found for request: {input_pb.request_id}")
+        logging.debug(
+            f"request: [{input_pb.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+        )
         try:
-            options = [
-                ("grpc.max_metadata_size", 1024 * 1024 * 1024),
-            ]
-            async with grpc.aio.insecure_channel(
-                address_list[input_py.request_id % len(address_list)], options=options
-            ) as channel:
-                stub = RpcServiceStub(channel)
-                response_iterator = stub.GenerateStreamCall(
-                    input_pb, timeout=grpc_timeout_seconds
-                )
-                # 调用服务器方法并接收流式响应
-                count = 0
-                async for response in response_iterator.__aiter__():
-                    count += 1
-                    yield trans_output(input_py, response, stream_state)
+            # Select target address
+            target_address = address_list[input_py.request_id % len(address_list)]
+
+            # Get channel from pool
+            channel = await self._channel_pool.get(target_address)
+            stub = RpcServiceStub(channel)
+
+            response_iterator = stub.GenerateStreamCall(
+                input_pb, timeout=grpc_timeout_seconds
+            )
+            # 调用服务器方法并接收流式响应
+            async for response in response_iterator.__aiter__():
+                yield trans_output(input_py, response, stream_state)
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:

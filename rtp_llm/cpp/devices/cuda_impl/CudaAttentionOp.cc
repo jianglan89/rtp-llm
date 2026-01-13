@@ -28,14 +28,17 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                                      const BufferPtr&        layer_cache,
                                      const BufferPtr&        kv_cache_block_id,
                                      int                     batch_size) {
-    return prepareTrtAttn(configs, 1, kv_cache_block_id, batch_size);
+    return prepareTrtAttn(configs, kv_cache_block_id, batch_size);
 }
 
-ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
-                                     int                     kv_block_offset,
-                                     const BufferPtr&        kv_cache_block_id,
-                                     int                     batch_size) {
-    if (!kv_block_offset || !kv_cache_block_id || 0 == batch_size) {
+ParamsPtr
+CudaDevice::prepareTrtAttn(const AttentionConfigs& configs, const BufferPtr& kv_cache_block_id, int batch_size) {
+    auto run_stream = stream_;
+    if (at::cuda::currentStreamCaptureStatus() != at::cuda::CaptureStatus::None) {
+        run_stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    }
+
+    if (!kv_cache_block_id || 0 == batch_size) {
         return nullptr;
     }
 
@@ -63,9 +66,10 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                           kv_cache_block_id->debugString().c_str());
     const size_t max_blocks_per_batch = kv_cache_block_id->shape()[1];
 
-    trt_attn->kv_cache_offset =
-        allocateBuffer({DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
-                       {"kv_cache_offset"});
+    // Create torch::Tensor for kv_cache_offset
+    trt_attn->kv_cache_offset = torch::empty({int64_t(batch_size), 1, 2, int64_t(max_blocks_per_batch)},
+                                             torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
     trt_attn->kv_block_array                     = KVBlockArray(batch_size,
                                             max_blocks_per_batch,
                                             configs.tokens_per_block,
@@ -74,21 +78,18 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                                             0,
                                             nullptr,  // (uint64_t*)k_cache.data(),
                                             nullptr,
-                                            (rtp_llm::KVCacheIndex*)trt_attn->kv_cache_offset->data<int>());
+                                            (rtp_llm::KVCacheIndex*)trt_attn->kv_cache_offset.data_ptr<int>());
     trt_attn->kv_block_array.cache_type          = cache_type;
     trt_attn->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
 
-    invokeConvertOffsetToBlockArrayData(trt_attn->kv_cache_offset->data<int>(),
+    invokeConvertOffsetToBlockArrayData(trt_attn->kv_cache_offset.data_ptr<int>(),
                                         kv_cache_block_id->data<int>(),
                                         batch_size,
                                         max_blocks_per_batch,
-                                        stream_);
+                                        run_stream);
     if (is_sm90() && fmha_type_ == FMHAType::PAGED_TRT_V2) {
-        trt_attn->kv_cache_offset_h = allocateBuffer(
-            {DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::HOST},
-            {"kv_cache_offset_h"});
-        copy({*trt_attn->kv_cache_offset_h, *trt_attn->kv_cache_offset});
-        trt_attn->kv_block_array.pagedKVBlockOffsetsOnHost = trt_attn->kv_cache_offset_h->data();
+        trt_attn->kv_cache_offset_h                        = trt_attn->kv_cache_offset.to(torch::kCPU);
+        trt_attn->kv_block_array.pagedKVBlockOffsetsOnHost = trt_attn->kv_cache_offset_h.data_ptr();
     }
 
     check_cuda_error();
@@ -188,41 +189,45 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         // if use mla cache, no need to store cache
         bool store_cache = params.common.kv_cache.has_value();
 
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                         invokeAddFusedQKVBiasTranspose,
-                                         q_no_transpose_output->data(),
-                                         q_output->data(),
-                                         k_output->data(),
-                                         v_output->data(),
-                                         &prefix_prompt_param,
-                                         params.input.data(),
-                                         qkv_buf_fp8 != nullptr ? qkv_buf_fp8->data() : nullptr,
-                                         params.common.position_ids ?
-                                             params.common.position_ids->dataWithOffset<int>(
-                                                 decoder_batch_size * params.configs.rope_config.index_factor) :
-                                             nullptr,
-                                         params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
-                                             params.weights.qkv_weight->bias->data() :
-                                             nullptr,
-                                         params.common.padding_offset->data<int>(),
-                                         params.common.cu_seqlens->data<int>(),
-                                         batch_size,
-                                         seq_len,
-                                         token_num,
-                                         head_num,
-                                         kv_head_num,
-                                         size_per_head,
-                                         params.configs.rope_config,
-                                         params.configs.use_logn_attn,
-                                         nullptr,  // scale_out_ptr,
-                                         0,        // int8_mode,
-                                         fmha_type_ == FMHAType::PAGED_TRT_V2,
-                                         store_qkv,
-                                         store_q_no_transpose,
-                                         store_q,
-                                         store_kv,
-                                         store_cache,
-                                         stream_);
+        auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len);
+
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+            datatype,
+            invokeAddFusedQKVBiasTranspose,
+            q_no_transpose_output->data(),
+            q_output->data(),
+            k_output->data(),
+            v_output->data(),
+            &prefix_prompt_param,
+            params.input.data(),
+            qkv_buf_fp8 != nullptr ? qkv_buf_fp8->data() : nullptr,
+            params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(
+                                             decoder_batch_size * params.configs.rope_config.index_factor) :
+                                         nullptr,
+            params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
+                params.weights.qkv_weight->bias->data() :
+                nullptr,
+            params.common.padding_offset->data<int>(),
+            params.common.cu_seqlens->data<int>(),
+            rope_cache.used,
+            checkRopeCache(params.configs.rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
+            batch_size,
+            seq_len,
+            token_num,
+            head_num,
+            kv_head_num,
+            size_per_head,
+            params.configs.rope_config,
+            params.configs.use_logn_attn,
+            nullptr,  // scale_out_ptr,
+            0,        // int8_mode,
+            fmha_type_ == FMHAType::PAGED_TRT_V2,
+            store_qkv,
+            store_q_no_transpose,
+            store_q,
+            store_kv,
+            store_cache,
+            stream_);
         check_cuda_error();
 
         if (!qkv_buf_fp8) {
@@ -349,8 +354,6 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     check_cuda_error();
 }
 
-static std::once_flag rope_cache_flag;
-
 AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
 
     // TODO: refactor QBuffer to suppport view and return QBuffer
@@ -374,7 +377,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     auto trt_attn       = ((TRTAttn*)params.common.decode_trt_attn.get());
     auto kv_block_array = trt_attn->kv_block_array;
     TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
-    printBufferData(*trt_attn->kv_cache_offset, "kv_cache_offset");
+    printTorchTensorData(trt_attn->kv_cache_offset, "kv_cache_offset");
 
     BufferPtr q_output;
     auto      flash_infer    = (FlashInferAttnParams*)params.common.decode_flash_infer_attn.get();
@@ -383,39 +386,33 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         q_output = allocateBuffer(
             {params.input.type(), {batch_size, local_head_num, size_per_head}, AllocationType::DEVICE}, {"q_output"});
 
-        bool use_rope_cache =
-            params.configs.rope_config.style == RopeStyle::Base || params.configs.rope_config.style == RopeStyle::Yarn;
-        static torch::Tensor rope_cache;
-        std::call_once(rope_cache_flag, [&]() {
-            if (use_rope_cache) {
-                rope_cache = getRopeCache(params.configs.rope_config, init_params_.max_seq_len);
-            }
-        });
+        auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len);
 
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
-                                         invokeDecodeAddFusedQKVBiasTranspose,
-                                         q_output->data(),
-                                         nullptr,  // k_buf
-                                         nullptr,  // v_buf
-                                         kv_block_array,
-                                         params.input.data(),
-                                         params.common.position_ids ? params.common.position_ids->data<int>() :
-                                                                      params.common.sequence_lengths->data<int>(),
-                                         params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
-                                             params.weights.qkv_weight->bias->data() :
-                                             nullptr,
-                                         use_rope_cache && rope_cache.defined() ? rope_cache.data_ptr<float>() :
-                                                                                  nullptr,
-                                         batch_size,
-                                         local_head_num,
-                                         local_kv_head_num,
-                                         size_per_head,
-                                         params.configs.rope_config,
-                                         params.configs.use_logn_attn,
-                                         true,   // store_q,
-                                         false,  // store_kv,
-                                         true,   // store_cache,
-                                         stream_);
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+            params.input.type(),
+            invokeDecodeAddFusedQKVBiasTranspose,
+            q_output->data(),
+            nullptr,  // k_buf
+            nullptr,  // v_buf
+            kv_block_array,
+            params.input.data(),
+            params.common.position_ids ? params.common.position_ids->data<int>() :
+                                         params.common.sequence_lengths->data<int>(),
+            params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
+                params.weights.qkv_weight->bias->data() :
+                nullptr,
+            rope_cache.used,
+            checkRopeCache(params.configs.rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
+            batch_size,
+            local_head_num,
+            local_kv_head_num,
+            size_per_head,
+            params.configs.rope_config,
+            params.configs.use_logn_attn,
+            true,   // store_q,
+            false,  // store_kv,
+            true,   // store_cache,
+            stream_);
 
         check_cuda_error();
     }
@@ -427,7 +424,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     if (use_xqa
         && supportXqa(params.input.type(),
                       params.output.type(),
-                      params.common.kv_cache->k_cache_buffer->type(),
+                      params.common.kv_cache->kv_cache_buffer->type(),
                       local_head_num / local_kv_head_num,
                       size_per_head,
                       local_tokens_per_block)) {
@@ -444,9 +441,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                local_tokens_per_block,
                kv_block_array.mPrimaryPoolPtr,
                reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
-               params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3,
+               params.common.kv_cache->kv_cache_buffer->type() == DataType::TYPE_FP8_E4M3,
                reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
-               this,
                params.output.type() == DataType::TYPE_FP8_E4M3 ?
                    reinterpret_cast<float*>(params.weights.static_scale_reciprocal_weight->kernel->data()) :
                    nullptr,

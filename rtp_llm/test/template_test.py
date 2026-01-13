@@ -9,6 +9,7 @@ from unittest import TestCase, main
 from transformers import AutoTokenizer
 from typing_extensions import override
 
+from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import (
     BaseTokenizer,
     QWenTokenizer,
@@ -195,7 +196,14 @@ class BaseRendererTestMixin(ABC):
         """运行渲染器测试的通用方法"""
         tokenizer = self.get_tokenizer()
         render_params = self.get_render_params()
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
         tools = self.get_tools()
 
         # 测试步骤1：初始消息
@@ -246,7 +254,15 @@ class TemplateTest(TestCase):
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
+
         logging.info(
             f"------- chat_renderer.get_renderer_info(): {chat_renderer.get_renderer_info()}"
         )
@@ -399,7 +415,15 @@ get_current_weather: Get the current weather in a given location. 输入参数�
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
+
         logging.info(
             f"------- chat_renderer.get_renderer_info(): {chat_renderer.get_renderer_info()}"
         )
@@ -557,7 +581,15 @@ get_current_weather: Get the current weather in a given location. 输入参数�
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
+
         assert isinstance(chat_renderer, QwenRenderer)
         assert (
             chat_renderer.template_chat_renderer.chat_template
@@ -777,7 +809,14 @@ template ends here"""
             """运行渲染器测试的通用方法"""
             tokenizer = self.get_tokenizer()
             render_params = self.get_render_params()
-            chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+            generate_env_config = GenerateEnvConfig()
+            render_config = RenderConfig()
+            chat_renderer = ChatRendererFactory.get_renderer(
+                tokenizer,
+                render_params,
+                generate_env_config=generate_env_config,
+                render_config=render_config,
+            )
             tools = self.get_tools()
 
             # 测试步骤1：初始消息
@@ -807,6 +846,56 @@ template ends here"""
             except Exception as e:
                 # 抛出了其他异常，测试失败
                 assert False, f"Expected ValueError but got {type(e).__name__}: {e}"
+
+    class Kimik2ThinkingRendererTestImpl(Kimik2RendererTestImpl):
+        """Kimi-K2-Thinking test inherits from regular Kimik2 test"""
+
+        def get_tools(self) -> List[GPTToolDefinition]:
+            return []
+
+        def get_initial_messages(self) -> List[ChatMessage]:
+            return [
+                ChatMessage(
+                    role=RoleEnum.system,
+                    content="You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30",
+                ),
+                ChatMessage(
+                    role=RoleEnum.user, content="What is 25 * 4? Think step by step."
+                ),
+            ]
+
+        def get_messages_with_tool_response(self) -> List[ChatMessage]:
+            messages = self.get_initial_messages()
+            messages.append(
+                ChatMessage(
+                    role=RoleEnum.assistant,
+                    content="<think>Let me calculate this step by step. 25 * 4 = 25 * 2 * 2 = 50 * 2 = 100</think>The answer is 100.",
+                )
+            )
+            messages.append(
+                ChatMessage(role=RoleEnum.user, content="What about 100 / 4?")
+            )
+            return messages
+
+        def get_messages_with_follow_up(self) -> List[ChatMessage]:
+            messages = self.get_messages_with_tool_response()
+            messages.append(
+                ChatMessage(
+                    role=RoleEnum.assistant,
+                    content="<think>100 divided by 4 is straightforward: 100 / 4 = 25</think>The result is 25.",
+                )
+            )
+            messages.append(ChatMessage(role=RoleEnum.user, content="Add 10 to that"))
+            return messages
+
+        def get_step1_expected_renderer_prompt(self) -> str:
+            return """<|im_system|>system<|im_middle|>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|im_end|><|im_user|>user<|im_middle|>What is 25 * 4? Think step by step.<|im_end|><|im_assistant|>assistant<|im_middle|>"""
+
+        def get_step2_expected_renderer_prompt(self) -> str:
+            return """<|im_system|>system<|im_middle|>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|im_end|><|im_user|>user<|im_middle|>What is 25 * 4? Think step by step.<|im_end|><|im_assistant|>assistant<|im_middle|><think>Let me calculate this step by step. 25 * 4 = 25 * 2 * 2 = 50 * 2 = 100</think>The answer is 100.<|im_end|><|im_user|>user<|im_middle|>What about 100 / 4?<|im_end|><|im_assistant|>assistant<|im_middle|>"""
+
+        def get_step3_expected_renderer_prompt(self) -> str:
+            return """<|im_system|>system<|im_middle|>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|im_end|><|im_user|>user<|im_middle|>What is 25 * 4? Think step by step.<|im_end|><|im_assistant|>assistant<|im_middle|><think>Let me calculate this step by step. 25 * 4 = 25 * 2 * 2 = 50 * 2 = 100</think>The answer is 100.<|im_end|><|im_user|>user<|im_middle|>What about 100 / 4?<|im_end|><|im_assistant|>assistant<|im_middle|><think>100 divided by 4 is straightforward: 100 / 4 = 25</think>The result is 25.<|im_end|><|im_user|>user<|im_middle|>Add 10 to that<|im_end|><|im_assistant|>assistant<|im_middle|>"""
 
     # Qwen3 Coder渲染器测试实现
     class Qwen3CoderRendererTestImpl(BaseRendererTestMixin):
@@ -884,13 +973,13 @@ template ends here"""
             )
 
         def get_step1_expected_renderer_prompt(self) -> str:
-            return """\n\n<｜begin▁of▁sentence｜>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n## Tools\nYou have access to the following tools:\n\n### get_current_temperature\nDescription: Get current temperature at a location.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}\n\n### get_temperature_date\nDescription: Get temperature at a location and date.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}\n\nIMPORTANT: ALWAYS adhere to this exact format for tool use:\n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>tool_call_name<｜tool▁sep｜>tool_call_arguments<｜tool▁call▁end｜>{{additional_tool_calls}}<｜tool▁calls▁end｜>\n\nWhere:\n\n- `tool_call_name` must be an exact match to one of the available tools\n- `tool_call_arguments` must be valid JSON that strictly follows the tool\'s Parameters Schema\n- For multiple tool calls, chain them directly without separators or spaces\n<｜User｜>What\'s the temperature in San Francisco now? How about tomorrow?  <｜Assistant｜>    </think>"""
+            return """<｜begin▁of▁sentence｜>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n## Tools\nYou have access to the following tools:\n\n### get_current_temperature\nDescription: Get current temperature at a location.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}\n\n### get_temperature_date\nDescription: Get temperature at a location and date.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}\n\nIMPORTANT: ALWAYS adhere to this exact format for tool use:\n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>tool_call_name<｜tool▁sep｜>tool_call_arguments<｜tool▁call▁end｜>{{additional_tool_calls}}<｜tool▁calls▁end｜>\n\nWhere:\n\n- `tool_call_name` must be an exact match to one of the available tools\n- `tool_call_arguments` must be valid JSON that strictly follows the tool\'s Parameters Schema\n- For multiple tool calls, chain them directly without separators or spaces\n<｜User｜>What\'s the temperature in San Francisco now? How about tomorrow?<｜Assistant｜></think>"""
 
         def get_step2_expected_renderer_prompt(self) -> str:
-            return """\n\n<｜begin▁of▁sentence｜>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n## Tools\nYou have access to the following tools:\n\n### get_current_temperature\nDescription: Get current temperature at a location.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}\n\n### get_temperature_date\nDescription: Get temperature at a location and date.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}\n\nIMPORTANT: ALWAYS adhere to this exact format for tool use:\n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>tool_call_name<｜tool▁sep｜>tool_call_arguments<｜tool▁call▁end｜>{{additional_tool_calls}}<｜tool▁calls▁end｜>\n\nWhere:\n\n- `tool_call_name` must be an exact match to one of the available tools\n- `tool_call_arguments` must be valid JSON that strictly follows the tool\'s Parameters Schema\n- For multiple tool calls, chain them directly without separators or spaces\n<｜User｜>What\'s the temperature in San Francisco now? How about tomorrow?      <｜Assistant｜></think>          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_temperature<｜tool▁sep｜>{"location": "San Francisco, CA, USA"}<｜tool▁call▁end｜>        <｜tool▁call▁begin｜>get_temperature_date<｜tool▁sep｜>{"location": "San Francisco, CA, USA", "date": "2024-10-01"}<｜tool▁call▁end｜>    <｜tool▁calls▁end｜><｜end▁of▁sentence｜><｜tool▁output▁begin｜>{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}<｜tool▁output▁end｜><｜tool▁output▁begin｜>{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}<｜tool▁output▁end｜>"""
+            return """<｜begin▁of▁sentence｜>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n## Tools\nYou have access to the following tools:\n\n### get_current_temperature\nDescription: Get current temperature at a location.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}\n\n### get_temperature_date\nDescription: Get temperature at a location and date.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}\n\nIMPORTANT: ALWAYS adhere to this exact format for tool use:\n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>tool_call_name<｜tool▁sep｜>tool_call_arguments<｜tool▁call▁end｜>{{additional_tool_calls}}<｜tool▁calls▁end｜>\n\nWhere:\n\n- `tool_call_name` must be an exact match to one of the available tools\n- `tool_call_arguments` must be valid JSON that strictly follows the tool\'s Parameters Schema\n- For multiple tool calls, chain them directly without separators or spaces\n<｜User｜>What\'s the temperature in San Francisco now? How about tomorrow?<｜Assistant｜></think><｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_temperature<｜tool▁sep｜>{"location": "San Francisco, CA, USA"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_temperature_date<｜tool▁sep｜>{"location": "San Francisco, CA, USA", "date": "2024-10-01"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜><｜tool▁output▁begin｜>{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}<｜tool▁output▁end｜><｜tool▁output▁begin｜>{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}<｜tool▁output▁end｜>"""
 
         def get_step3_expected_renderer_prompt(self) -> str:
-            return """\n\n<｜begin▁of▁sentence｜>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n## Tools\nYou have access to the following tools:\n\n### get_current_temperature\nDescription: Get current temperature at a location.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}\n\n### get_temperature_date\nDescription: Get temperature at a location and date.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}\n\nIMPORTANT: ALWAYS adhere to this exact format for tool use:\n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>tool_call_name<｜tool▁sep｜>tool_call_arguments<｜tool▁call▁end｜>{{additional_tool_calls}}<｜tool▁calls▁end｜>\n\nWhere:\n\n- `tool_call_name` must be an exact match to one of the available tools\n- `tool_call_arguments` must be valid JSON that strictly follows the tool\'s Parameters Schema\n- For multiple tool calls, chain them directly without separators or spaces\n<｜User｜>What\'s the temperature in San Francisco now? How about tomorrow?      <｜Assistant｜></think>          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_temperature<｜tool▁sep｜>{"location": "San Francisco, CA, USA"}<｜tool▁call▁end｜>        <｜tool▁call▁begin｜>get_temperature_date<｜tool▁sep｜>{"location": "San Francisco, CA, USA", "date": "2024-10-01"}<｜tool▁call▁end｜>    <｜tool▁calls▁end｜><｜end▁of▁sentence｜><｜tool▁output▁begin｜>{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}<｜tool▁output▁end｜><｜tool▁output▁begin｜>{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}<｜tool▁output▁end｜>      San Francisco今天26.1度, 明天25.9度<｜end▁of▁sentence｜><｜User｜>那北京明天温度如何  <｜Assistant｜>    </think>"""
+            return """<｜begin▁of▁sentence｜>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n## Tools\nYou have access to the following tools:\n\n### get_current_temperature\nDescription: Get current temperature at a location.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}\n\n### get_temperature_date\nDescription: Get temperature at a location and date.\n\nParameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}\n\nIMPORTANT: ALWAYS adhere to this exact format for tool use:\n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>tool_call_name<｜tool▁sep｜>tool_call_arguments<｜tool▁call▁end｜>{{additional_tool_calls}}<｜tool▁calls▁end｜>\n\nWhere:\n\n- `tool_call_name` must be an exact match to one of the available tools\n- `tool_call_arguments` must be valid JSON that strictly follows the tool\'s Parameters Schema\n- For multiple tool calls, chain them directly without separators or spaces\n<｜User｜>What\'s the temperature in San Francisco now? How about tomorrow?<｜Assistant｜></think><｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_temperature<｜tool▁sep｜>{"location": "San Francisco, CA, USA"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_temperature_date<｜tool▁sep｜>{"location": "San Francisco, CA, USA", "date": "2024-10-01"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜><｜tool▁output▁begin｜>{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}<｜tool▁output▁end｜><｜tool▁output▁begin｜>{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}<｜tool▁output▁end｜>San Francisco今天26.1度, 明天25.9度<｜end▁of▁sentence｜><｜User｜>那北京明天温度如何<｜Assistant｜></think>"""
 
     def test_qwen3(self):
         """Qwen3渲染器测试"""
@@ -911,6 +1000,11 @@ template ends here"""
         """Kimik2 Error Check渲染器测试"""
         kimik2_error_check_test = self.Kimik2RendererErrorCheckTestImpl(self)
         kimik2_error_check_test.run_renderer_test()
+
+    def test_kimik2_thinking(self):
+        """Kimik2 Thinking渲染器测试"""
+        kimik2_thinking_test = self.Kimik2ThinkingRendererTestImpl(self)
+        kimik2_thinking_test.run_renderer_test()
 
     def test_qwen3_coder(self):
         """Qwen3 Coder渲染器测试"""

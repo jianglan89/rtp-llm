@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/cuda/cufmha/TRTAttn.h"
 #include "rtp_llm/cpp/cuda/cufmha/cufmha.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
@@ -57,32 +58,6 @@ private:
     cudaStream_t comm_stream_;
 };
 
-struct TRTAttn: public ParamsBase {
-    KVBlockArray kv_block_array;
-    BufferPtr    kv_cache_offset;
-    BufferPtr    kv_cache_offset_h;
-
-    torch::Tensor padding_offset;
-    torch::Tensor cu_seqlens;
-    torch::Tensor cu_kv_seqlens;
-    torch::Tensor input_lengths;
-    torch::Tensor sequence_lengths;
-    torch::Tensor cu_mask_rows;
-    int           max_seq_len;
-    bool          decode_plan;
-
-    DataType attn_type;
-
-    static void setKvCache(KVBlockArray& kv_block_array, const KvCacheInfo& kv_cache) {
-        kv_block_array.mPrimaryPoolPtr = kv_cache.k_cache_buffer->data();
-        if (kv_cache.k_scale_buffer) {
-            kv_block_array.scale = kv_cache.k_scale_buffer->data();
-        }
-    }
-};
-
-using TRTAttnPtr = std::shared_ptr<TRTAttn>;
-
 class CudaDevice: public DeviceBase {
 public:
     CudaDevice(const DeviceInitParams& params);
@@ -112,10 +87,6 @@ public:
     DeviceEventPtr   createEvent() override;
     DeviceEventPtr   createTorchEvent() override;
     bool             useGroupGemm() const;
-    GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
-                                          py::object              py_instance,
-                                          int                     kv_cache_block_offset,
-                                          bool                    is_prefill_cuda_graph_mode = false) override;
 
 private:
     void         checkUseOpenSourceFMHA();
@@ -124,7 +95,6 @@ private:
     void         checkUseMultiBlockMode();
     void         checkUseXQA();
     void         checkSupportTrtFp8FMHA();
-    void         checkUseFlashinferSampleKernel();
     bool         useFp8Fmha(const DevicePrepParams& params) const;
     void         initMoeRunner(const DataType compute_type, const DataType weights_type);
     void         initNcclParam(size_t             rank,
@@ -142,10 +112,8 @@ private:
     cudaStream_t getCommStream(ParallelMode mode, bool overlap);
     template<typename QuantType>
     LayernormOutput _layernorm(const LayernormParams& params);
-    bool            checkUseFlashinferSampleGreedy(const GreedyParams& params);
     GreedyOutput    flashinferSampleGreedy(const GreedyParams& params, const BufferPtr& transposed_tokens);
     void processLogits(const GreedyParams& params, const BufferPtr& device_tokens, const BufferPtr& transposed_tokens);
-    void completeSampleGreedy(const GreedyParams& params, const BufferPtr& transposed_tokens);
 
 public:
     void setStream(cudaStream_t stream) {
@@ -238,34 +206,22 @@ public:
     MoeCombineOutput  deepEpLLCombine(const MoeCombineParams& params);
     FfnLayerOutput    deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
 
-    static torch::Tensor              packInt8TensorToPackedInt4(torch::Tensor weight);
-    static torch::Tensor              preprocessWeightsForMixedGemm(torch::Tensor      row_major_quantized_weight,
-                                                                    torch::ScalarType  quant_type,
-                                                                    const std::string& arch);
-    static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor      weight,
-                                                                               torch::ScalarType  quant_type,
-                                                                               const std::string& arch);
-    void                              prepareCommBuffer(const PrepareCommBufferParams& params) override;
-    void                              maskLogits(Buffer& logits, const Buffer& mask) override;
+    void prepareCommBuffer(const PrepareCommBufferParams& params) override;
+    void maskLogits(Buffer& logits, const Buffer& mask) override;
 
     void perfRangePush(const std::string& name) const override;
     void perfRangePop() const override;
 
 public:
-    ParamsPtr prepareTrtAttn(const AttentionConfigs& configs,
-                             int                     kv_block_offset,
-                             const BufferPtr&        kv_cache_block_id,
-                             int                     batch_size);
+    ParamsPtr prepareTrtAttn(const AttentionConfigs& configs, const BufferPtr& kv_cache_block_id, int batch_size);
 
     ParamsPtr prepareTrtAttn(const AttentionConfigs& configs,
-                             const BufferPtr&        k_cache,
+                             const BufferPtr&        kv_cache,
                              const BufferPtr&        kv_cache_block_id,
                              int                     batch_size);
 
     std::shared_ptr<cufmha>
     selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dtype, bool has_alibi_slopes);
-    // only for cuda graph test
-    void setIsPadded(bool is_s_padded);
 
 protected:
     DevicePrepOutput prepareModelRunCommon(const DevicePrepParams& params);
@@ -340,10 +296,6 @@ private:
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
 
-    GraphBase* graph_runner_{nullptr};
-
-    BufferPtr curandstate_buf_;  // for sampler use.
-
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;  // for custom allreduce use
 
     // BufferPtr will be error when multi stream, tmp hold
@@ -361,16 +313,15 @@ private:
     std::vector<BufferPtr> moe_hold_host_buffers_;
 
 protected:
-    bool use_trtv1_fmha               = false;
-    bool use_trtv2_fmha               = false;
-    bool use_trtv2_fmha_paged         = false;
-    bool use_open_source_fmha         = false;
-    bool use_open_source_fmha_paged   = false;
-    bool use_xqa                      = false;
-    bool use_group_gemm               = false;
-    bool support_trt_fp8_fmha         = false;
-    bool use_fp8_fmha_                = false;
-    bool use_flashinfer_sample_kernel = false;
+    bool use_trtv1_fmha             = false;
+    bool use_trtv2_fmha             = false;
+    bool use_trtv2_fmha_paged       = false;
+    bool use_open_source_fmha       = false;
+    bool use_open_source_fmha_paged = false;
+    bool use_xqa                    = false;
+    bool use_group_gemm             = false;
+    bool support_trt_fp8_fmha       = false;
+    bool use_fp8_fmha_              = false;
 
     bool use_stable_scatter_add = false;
 

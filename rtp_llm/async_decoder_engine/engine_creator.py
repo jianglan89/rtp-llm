@@ -6,33 +6,45 @@ import torch
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
-from rtp_llm.async_decoder_engine.rpc_engine import RPCEngine
+from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
+from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
+from rtp_llm.ops import TaskType
+from rtp_llm.utils.time_util import timer_wrapper
 
 
-class ExecutorType(Enum):
-    Normal = "normal"
-    Embedding = "embedding"
-
-
-def check_exeutor_type(model: BaseModel):
-    if model.custom_module is not None:
-        return ExecutorType.Embedding
-    return ExecutorType.Normal
-
-
+@timer_wrapper(description="create async engine")
 def create_engine(
-    model: BaseModel, propose_model: Optional[ProposeModel] = None, gang_info=None
+    model: BaseModel,
+    engine_config: EngineConfig,
+    alog_conf_path: str,
+    world_info=None,
+    propose_model: Optional[ProposeModel] = None,
 ) -> BaseEngine:
-    torch.ops.rtp_llm.init_engine(
-        model.config.gpt_init_params.profiling_debug_logging_config.ft_alog_conf_path
-    )
-    executor_type = check_exeutor_type(model)
-    logging.info(f"executor_type: {executor_type}")
-    if executor_type == ExecutorType.Normal:
-        return RPCEngine(model, propose_model, gang_info)
-    elif executor_type == ExecutorType.Embedding:
-        return EmbeddingCppEngine(model)
+    """
+    Create an engine for the given model and config.
+
+    Args:
+        model: The BaseModel instance
+        engine_config: EngineConfig instance containing runtime and parallelism configs
+        alog_conf_path: Path to the alog configuration file
+        world_info: Distributed world info (e.g., from get_world_info())
+        propose_model: Optional propose model for speculative decoding
+
+    Returns:
+        BaseEngine instance
+    """
+    torch.ops.rtp_llm.init_engine(alog_conf_path)
+
+    if model.model_config.task_type == TaskType.LANGUAGE_MODEL:
+        return LanguageCppEngine(
+            model=model,
+            engine_config=engine_config,
+            world_info=world_info,
+            propose_model=propose_model,
+        )
+        logging.info("create llm engine")
     else:
-        raise Exception(f"unsupported executor type: {executor_type}")
+        logging.info("create embedding engine")
+        return EmbeddingCppEngine(model, engine_config)

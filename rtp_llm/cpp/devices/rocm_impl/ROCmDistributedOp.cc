@@ -99,6 +99,23 @@ AllReduceOutput ROCmDevice::allReduce(const AllReduceParams& params) {
     const auto nccl_op        = static_cast<ncclRedOp_t>(params.op);
     const auto nccl_data_type = getNcclDataType(buffer->type());
 
+    bool use_quick_ar =
+        !params.dest
+        && (params.mode == ParallelMode::TP
+            || (params.mode == ParallelMode::FFN_TP && tp_nccl_param_ == ffn_tp_nccl_param_))
+        && quick_allreduce_comm_ && nccl_op == ncclSum
+        && quick_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param.world_size_);
+
+    // if quick allreduce fails, try custom allreduce then
+    if (use_quick_ar) {
+        auto quick_ar_res_buf =
+            allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"quick_ar_buf"});
+        torch::Tensor input_tensor  = Buffer2torchTensor(*buffer, false);
+        torch::Tensor output_tensor = Buffer2torchTensor(*quick_ar_res_buf, false);
+        quick_allreduce_comm_->allReduce(input_tensor, output_tensor);
+        return AllReduceOutput{quick_ar_res_buf};
+    }
+
     bool use_custom_ar =
         !params.dest
         && (params.mode == ParallelMode::TP
@@ -145,6 +162,31 @@ void ROCmDevice::allGather(const AllGatherParams& params) {
                               "Buffer size %ld must be divisible by world size %d",
                               recv_buffer->size(),
                               nccl_param.world_size_);
+
+        // invoke aiter custom all-gather
+        // custom all-gather is integrated into custom all-reduce
+        bool use_custom_ag =
+            params.mode == ParallelMode::TP
+            and custom_allreduce_comm_
+            and custom_allreduce_comm_->checkAllGatherAvailable();
+
+        if (use_custom_ag) {
+            torch::Tensor input_tensor;
+
+            if (params.inplace) {
+                auto option_ = torch::dtype(dataTypeToTorchType(recv_buffer->type())).device(memoryTypeToTorchDevice(recv_buffer->where())).requires_grad(false);
+                std::vector<int64_t> shape_{static_cast<int64_t>(data_num)};
+                input_tensor = torch::from_blob(recv_buffer->dataWithOffset(nccl_param.rank_ * data_num), shape_, option_);
+            } else {
+                input_tensor = Buffer2torchTensor(*(params.send_buffers[i]), false);
+            }
+            torch::Tensor output_tensor = Buffer2torchTensor(*recv_buffer, false);
+
+            custom_allreduce_comm_->allGather(input_tensor, output_tensor);
+
+            continue;
+        }
+
         if (params.inplace) {
             const auto data_size = data_num * recv_buffer->typeSize();
             NCCLCHECK(ncclAllGather((char*)(recv_buffer->data()) + nccl_param.rank_ * data_size,

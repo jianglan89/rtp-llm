@@ -10,11 +10,13 @@ def git_deps():
     git_repository(
         name = "aiter_src",
         remote = "https://github.com/ROCm/aiter.git",
-        commit = "329d07ba5d77f7d6b2a0557174288c5707f95e5f", # [Triton] DS a16w8 GEMM and fused reduce_rms_fp8_group_quant (#1328)
+        commit = "e3ec80b88cb5be74ce2a8bee992cec0af7889a79", # Support torch.library.infer_schema for torch < 2.5 (#773)
         recursive_init_submodules = True,
-        patches = ["//3rdparty/aiter:aiter.patch", "//3rdparty/aiter:gemm_a8w8.patch"],
+        patches = ["//3rdparty/aiter:aiter.patch",
+                   "//3rdparty/aiter:gemm_a8w8.patch"],
         patch_cmds = [
             "echo 'from aiter.jit.core import compile_ops, get_args_of_build, build_module, get_module' >> build_aiter_module.py",
+            "echo 'import multiprocessing' >> build_aiter_module.py",
             "echo 'from typing import Dict' >> build_aiter_module.py",
             "echo 'import os' >> build_aiter_module.py",
             "echo '' >> build_aiter_module.py",
@@ -52,24 +54,29 @@ def git_deps():
             "echo '                         torch_exclude,' >> build_aiter_module.py",
             "echo '    )' >> build_aiter_module.py",
             "echo 'if __name__ == \"__main__\":' >> build_aiter_module.py",
+            "echo '    # prebuild module_aiter_enum, which is needed by other modules' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_aiter_enum\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_custom_all_reduce\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_quick_all_reduce\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_norm\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_rmsnorm\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_mha_fwd\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_fmha_v3_varlen_fwd\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_gemm_a8w8_blockscale\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_quant\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_smoothquant\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_moe_sorting\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_moe_asm\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_pa\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_attention_asm\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_activation\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_gemm_a8w8_bpreshuffle\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_gemm_a8w8\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_moe_ck2stages\")' >> build_aiter_module.py",
+            "echo '    module_names = []' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_custom_all_reduce\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_norm\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_rmsnorm\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_mha_fwd\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_fmha_v3_varlen_fwd\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_gemm_a8w8_blockscale\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_quant\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_smoothquant\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_moe_sorting\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_moe_asm\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_pa\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_attention_asm\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_activation\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_gemm_a8w8_bpreshuffle\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_gemm_a8w8\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_moe_ck2stages\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_deepgemm\")' >> build_aiter_module.py",
+            "echo '    module_names.append(\"module_quick_all_reduce\")' >> build_aiter_module.py",
+            "echo '    with multiprocessing.Pool(processes = 64) as pool:' >> build_aiter_module.py",
+            "echo '        pool.map(build_aiter_module, module_names)' >> build_aiter_module.py",
             "echo 'echo \"building mla kernel\"' >> build_mla_kernel.sh",
             "echo 'so_file=\"./csrc/cpp_itfs/mla/asm_mla_decode_fwd_torch_lib.so\"' >> build_mla_kernel.sh",
             "echo 'if [ -f $so_file ]; then' >> build_mla_kernel.sh",
@@ -138,7 +145,7 @@ def git_deps():
     )
 
     new_git_repository(
-        name = "flashinfer",
+        name = "flashinfer_cpp",
         remote = "https://github.com/flashinfer-ai/flashinfer.git",
         commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",
         build_file = str(Label("//3rdparty/flashinfer:flashinfer.BUILD")),
@@ -149,7 +156,8 @@ def git_deps():
             "//3rdparty/flashinfer:0005-update-add-mla-attn-test-impl-mla-write-kvcache.patch",
             "//3rdparty/flashinfer:0006-add-mla-dispatch-inc.patch",
             "//3rdparty/flashinfer:0007-fix-nan.patch",
-            "//3rdparty/flashinfer:0008-enable-pdl.patch"
+            "//3rdparty/flashinfer:0008-enable-pdl.patch",
+            "//3rdparty/flashinfer:0009-sp-sample.patch",
         ],
     )
 
@@ -371,37 +379,4 @@ def git_deps():
     native.bind(
         name = "zlib",
         actual = "@zlib_archive//:zlib",
-    )
-
-    # DeepGEMM dependency for RTP-LLM - using git repository
-    new_git_repository(
-        name = "deep_gemm_ext",
-        remote = "https://github.com/deepseek-ai/DeepGEMM.git",
-        commit = "79f48ee15a82dd5fad5cd9beaa393c1f755e6b55",
-        build_file = clean_dep("//3rdparty/deep_gemm:BUILD"),
-        patches = [
-            "//3rdparty/deep_gemm:0001-fix-smem_buffer.patch",
-        ],
-        patch_args = ["-p0"],
-        recursive_init_submodules = True,
-        patch_cmds = [
-            "mkdir -p deep_gemm_headers_temp",
-            "cp -r third-party/cutlass/include/* deep_gemm_headers_temp/ || true",
-            "mkdir -p deep_gemm_headers_temp/cute",
-            "if [ -d third-party/cutlass/include/cute ]; then cp -r third-party/cutlass/include/cute/* deep_gemm_headers_temp/cute/; fi || true",
-            "mkdir -p deep_gemm_headers_temp/deep_gemm",
-            "if [ -d deep_gemm/include ]; then find deep_gemm/include -name '*.h' -o -name '*.hpp' -o -name '*.cuh' | while read f; do rel=${f#deep_gemm/include/}; if [[ $rel != deep_gemm/* ]]; then mkdir -p deep_gemm_headers_temp/deep_gemm/$(dirname $rel); cp $f deep_gemm_headers_temp/deep_gemm/$rel; fi; done; fi || true",
-            "if [ -d deep_gemm/include/deep_gemm ]; then cp -r deep_gemm/include/deep_gemm/* deep_gemm_headers_temp/deep_gemm/; fi || true",
-            "rm -rf deep_gemm/include && mv deep_gemm_headers_temp deep_gemm/include",
-        ],
-    )
-
-    new_git_repository(
-        name = "flash-linear-attention",
-        remote = "https://github.com/fla-org/flash-linear-attention.git",
-        commit = "0d3e202a9c5a1a829ac3fe7c0a0c5fec0bf8f00b",
-        patches = [
-            "//3rdparty/flash_linear_attention:0001-modify-init.patch",
-        ],
-        build_file = str(Label("//3rdparty/flash_linear_attention:fla.BUILD")),
     )

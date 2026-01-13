@@ -45,6 +45,7 @@ py_test(
         "//rtp_llm:_ft_pickler",
         "//rtp_llm:pynvml",
         "//rtp_llm:psutil",
+        "//rtp_llm:fastapi",
     ],
 )
 
@@ -61,6 +62,45 @@ py_test(
         "//rtp_llm:oss2",
         "//rtp_llm:pyOpenSSL",
         "//rtp_llm:config_ops"
+    ],
+    data = [
+        "//:th_transformer",
+        "//:th_transformer_config",
+        "//:rtp_compute_ops",
+    ],
+    exec_properties = {'gpu':'A10'}
+)
+
+py_test(
+    name = "process_manager_test",
+    srcs = [
+        "process_manager_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+    data = [
+        "//:th_transformer",
+        "//:th_transformer_config",
+        "//:rtp_compute_ops",
+    ],
+    exec_properties = {'gpu':'A10'}
+)
+
+load("//bazel:arch_select.bzl", "requirement")
+
+requirement([
+    "grpcio",
+])
+
+py_test(
+    name = "grpc_host_channel_pool_test",
+    srcs = [
+        "grpc_host_channel_pool_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+        ":grpcio",
     ],
     data = [
         "//:th_transformer",

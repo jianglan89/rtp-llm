@@ -12,15 +12,18 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
-from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.worker_info import WorkerInfo, g_worker_info
+from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 from rtp_llm.utils.util import AtomicCounter, async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
@@ -49,25 +52,26 @@ class GracefulShutdownServer(Server):
 class FrontendApp(object):
     def __init__(
         self,
-        py_env_configs: PyEnvConfigs = StaticConfig,
+        py_env_configs: PyEnvConfigs,
         separated_frontend: bool = False,
     ):
-        self.py_env_configs = py_env_configs
+        self.server_config = py_env_configs.server_config
         self.frontend_server = FrontendServer(
-            separated_frontend,
-            py_env_configs.server_config.rank_id,
-            py_env_configs.server_config.frontend_server_id,
+            self.server_config.rank_id,
+            self.server_config.frontend_server_id,
+            py_env_configs,
         )
         self.separated_frontend = separated_frontend
+        self.grpc_client = GrpcClientWrapper(g_worker_info.rpc_server_port)
         g_worker_info.server_port = WorkerInfo.server_port_offset(
-            self.py_env_configs.server_config.rank_id, g_worker_info.server_port
+            self.server_config.rank_id, g_worker_info.server_port, py_env_configs.server_config.worker_info_port_num
         )
         g_worker_info.backend_server_port = WorkerInfo.server_port_offset(
-            self.py_env_configs.server_config.rank_id, g_worker_info.backend_server_port
+            self.server_config.rank_id, g_worker_info.backend_server_port, py_env_configs.server_config.worker_info_port_num
         )
         logging.info(
-            f"rank_id = {self.py_env_configs.server_config.rank_id}, "
-            f"server_port = {g_worker_info.server_port}, backend_server_port = {g_worker_info.backend_server_port}, frontend_server_id = {py_env_configs.server_config.frontend_server_id}"
+            f"rank_id = {self.server_config.rank_id}, "
+            f"server_port = {g_worker_info.server_port}, backend_server_port = {g_worker_info.backend_server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
         )
 
     def start(self):
@@ -86,17 +90,19 @@ class FrontendApp(object):
         sock.bind(("0.0.0.0", g_worker_info.server_port))
         sock.listen()
         fd = sock.fileno()
-        timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
+        timeout_keep_alive = self.server_config.timeout_keep_alive
 
         config = Config(
             app,
             fd=fd,
             loop=loop,
-            log_config=UVICORN_LOGGING_CONFIG,
+            log_config=get_uvicorn_logging_config(),
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
-
+        logging.info(
+            f"Starting Uvicorn server on port {g_worker_info.server_port} with timeout_keep_alive={timeout_keep_alive}"
+        )
         try:
             server = GracefulShutdownServer(config)
             server.set_server(self.frontend_server)
@@ -144,18 +150,30 @@ class FrontendApp(object):
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "health_check", {}
-            )
+            if self.frontend_server.is_embedding:
+                return await async_request_server(
+                    "post", g_worker_info.http_port, "health_check", {}
+                )
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") != "ok":
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
+                )
+            return "ok"
 
         @app.get("/")
         async def health():
             if self.separated_frontend:
                 await check_all_health()
                 return {"status": "home"}
-            return await async_request_server(
-                "get", g_worker_info.backend_server_port, "", {}
-            )
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") != "ok":
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
+                )
+            return "ok"
 
         @app.get("/cache_status")
         @app.post("/cache_status")
@@ -169,14 +187,17 @@ class FrontendApp(object):
             )
 
             logging.info(f"cache_status request {data}")
-            response = await async_request_server(
-                "post", g_worker_info.backend_server_port, "cache_status", query_params
-            )
+            response = await self.grpc_client.post_request("cache_status", query_params)
             if "error" not in response:
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
                 )
             logging.info(f"cache_status response {response}")
+            if "error" in response:
+                return ORJSONResponse(
+                    status_code=500,
+                    content=response,
+                )
             return response
 
         @app.get("/worker_status")
@@ -189,24 +210,19 @@ class FrontendApp(object):
             query_params = (
                 dict(request.query_params) if request.method == "GET" else (data or {})
             )
-            response = await async_request_server(
-                "post", g_worker_info.backend_server_port, "worker_status", query_params
+            response = await self.grpc_client.post_request(
+                "worker_status", query_params
             )
             if "error" not in response:
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
                 )
+            else:
+                return ORJSONResponse(
+                    status_code=500,
+                    content=response,
+                )
             return response
-
-        # example : {"peft_info": {"lora_info": {"lora_0": "/lora/llama-lora-test/""}}}
-        @app.post("/update")
-        async def update(version_info: VersionInfo):
-            return await async_request_server(
-                "post",
-                g_worker_info.backend_server_port,
-                "update",
-                version_info.model_dump(),
-            )
 
         @app.get("/v1/models")
         async def list_models():
@@ -216,16 +232,14 @@ class FrontendApp(object):
         # request format: {"log_level": "DEBUG"}, {"log_level": "info"}
         @app.post("/set_log_level")
         async def set_log_level(req: Union[str, Dict[Any, Any]]):
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "set_log_level", req
-            )
+            result = await self.grpc_client.post_request("set_log_level", req)
+            return result
 
         # request format: {"mode": "NONE", "update_time": 5000}
         @app.post("/update_eplb_config")
-        async def update_eplb_config(req: Dict[Any, Any]):
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "update_eplb_config", req
-            )
+        async def update_eplb_config(req: Union[str, Dict[Any, Any]]):
+            result = await self.grpc_client.post_request("update_eplb_config", req)
+            return result
 
         @app.post("/")
         async def inference(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
@@ -234,9 +248,7 @@ class FrontendApp(object):
             active_requests.increment()
             try:
                 if self.frontend_server.is_embedding:
-                    return await async_request_server(
-                        "post", g_worker_info.backend_server_port, "v1/embeddings", req
-                    )
+                    return await self.frontend_server.embedding(req, raw_request)
                 else:
                     return await self.frontend_server.inference(req, raw_request)
             finally:
@@ -256,9 +268,8 @@ class FrontendApp(object):
 
         @app.post("/update_scheduler_info")
         async def update_scheduler_info(req: Union[str, Dict[Any, Any]]):
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "update_scheduler_info", req
-            )
+            result = await self.grpc_client.post_request("update_scheduler_info", req)
+            return result
 
         @app.post("/chat/render")
         @app.post("/v1/chat/render")
@@ -281,70 +292,32 @@ class FrontendApp(object):
         async def encode(req: Union[str, Dict[Any, Any]]):
             return self.frontend_server.tokenize(req)
 
-        @app.post("/update_weight")
-        async def update_weight(req: Union[str, Dict[Any, Any]]):
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "update_weight", req
-            )
-
         if self.frontend_server.is_embedding:
             # embedding
+            @app.post("/v1/embeddings/similarity")
+            @app.post("/v1/reranker")
+            @app.post("/v1/classifier")
             @app.post("/v1/embeddings")
             async def embedding(request: Dict[str, Any], raw_request: RawRequest):
-                return await async_request_server(
-                    "post", g_worker_info.backend_server_port, "v1/embeddings", request
-                )
+                return await self.frontend_server.embedding(request, raw_request)
 
             @app.post("/v1/embeddings/dense")
             async def embedding_dense(request: Dict[str, Any], raw_request: RawRequest):
-                return await async_request_server(
-                    "post",
-                    g_worker_info.backend_server_port,
-                    "v1/embeddings/dense",
-                    request,
-                )
+                request[TYPE_STR] = EmbeddingType.DENSE
+                return await self.frontend_server.embedding(request, raw_request)
 
             @app.post("/v1/embeddings/sparse")
             async def embedding_sparse(
                 request: Dict[str, Any], raw_request: RawRequest
             ):
-                return await async_request_server(
-                    "post",
-                    g_worker_info.backend_server_port,
-                    "v1/embeddings/sparse",
-                    request,
-                )
+                request[TYPE_STR] = EmbeddingType.SPARSE
+                return await self.frontend_server.embedding(request, raw_request)
 
             @app.post("/v1/embeddings/colbert")
             async def embedding_colbert(
                 request: Dict[str, Any], raw_request: RawRequest
             ):
-                return await async_request_server(
-                    "post",
-                    g_worker_info.backend_server_port,
-                    "v1/embeddings/colbert",
-                    request,
-                )
-
-            @app.post("/v1/embeddings/similarity")
-            async def similarity(request: Dict[str, Any], raw_request: RawRequest):
-                return await async_request_server(
-                    "post",
-                    g_worker_info.backend_server_port,
-                    "v1/embeddings/similarity",
-                    request,
-                )
-
-            @app.post("/v1/classifier")
-            async def classifier(request: Dict[str, Any], raw_request: RawRequest):
-                return await async_request_server(
-                    "post", g_worker_info.backend_server_port, "v1/classifier", request
-                )
-
-            @app.post("/v1/reranker")
-            async def reranker(request: Dict[str, Any], raw_request: RawRequest):
-                return await async_request_server(
-                    "post", g_worker_info.backend_server_port, "v1/reranker", request
-                )
+                request[TYPE_STR] = EmbeddingType.COLBERT
+                return await self.frontend_server.embedding(request, raw_request)
 
         return app

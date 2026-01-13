@@ -35,6 +35,7 @@ cc_library(
         "//rtp_llm/cpp/core:torch_cuda_allocator",
         "//rtp_llm/cpp/core:torch_event",
         "//rtp_llm/cpp/pybind:th_utils",
+        "//rtp_llm/cpp/config:model_config",
     ] + select({
         ":use_accl_ep": [
             "//3rdparty/accl_ep:accl_ep",
@@ -63,7 +64,6 @@ cc_library(
     }),
     srcs = [
         "CudaDevice.cc",
-        "CudaWeights.cc",
         "CudaAttentionOp.cc",
         "CudaFfnLayer.cc",
         "CudaMlaAttentionOp.cc",
@@ -76,7 +76,10 @@ cc_library(
         "CudaDeepEPLLFfnLayer.cc",
         "CudaDeepEPFfnLayer.cc",
         "CudaFlashInfer.cc",
+        "CudaGraphUtils.cc",
         "CudaGraphRunner.cc",
+        "CudaGraphPrefill.cc",
+        "CudaGraphDecode.cc",
     ] + select({
         "@//:using_cuda12": [
             "CudaXqa.cc"

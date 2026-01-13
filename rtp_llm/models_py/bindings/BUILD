@@ -7,11 +7,9 @@ cc_library(
         "OpDefs.h",
         "OpDefsUtils.h",
         "ParamsBase.h",
-        "MlaParamsBase.h",
     ],
     srcs = [
         "OpDefs.cc",
-        "OpDefsUtils.cc",
     ],
     deps = torch_deps() + [
         "//rtp_llm/cpp/model_utils:model_utils",

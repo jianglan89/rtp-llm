@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineOutputs
 from rtp_llm.config.base_model_config import PyDanticModelBase
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
@@ -32,6 +32,7 @@ from rtp_llm.models.downstream_modules.embedding.sparse_emebdding_module import 
     SparseEmbeddingHandler,
     SparseEmbeddingModule,
 )
+from rtp_llm.ops import EmbeddingCppOutput
 
 
 class RequestTuple(PyDanticModelBase):
@@ -40,7 +41,7 @@ class RequestTuple(PyDanticModelBase):
 
 
 class BgeM3EmbeddingModule(CustomModule):
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         self._colbert_module = ColBertEmbeddingModule(config, tokenizer)
         self._sparse_module = SparseEmbeddingModule(config, tokenizer)
         self._dense_module = DenseEmbeddingModule(config, tokenizer)
@@ -81,6 +82,7 @@ class BgeM3EmbeddingHandler(CustomHandler):
         sparse: SparseEmbeddingHandler,
         colbert: ColBertEmbeddingHandler,
     ):
+        self.need_post_process = True
         self.dense_handler = dense
         self.sparse_handler = sparse
         self.colbert_handler = colbert
@@ -119,12 +121,12 @@ class BgeM3EmbeddingHandler(CustomHandler):
         request: Union[
             OpenAIEmbeddingRequest, SparseEmbeddingRequest, ColbertEmbeddingRequest
         ],
-        batch_output: EngineOutputs,
-    ) -> EngineOutputs:
+        batch_output: EmbeddingCppOutput,
+    ) -> EmbeddingCppOutput:
         embedding_type = self._get_embedding_type(request)
-        if not isinstance(batch_output.outputs, list):
+        if not isinstance(batch_output.output, list):
             raise Exception("BgeM3EmbeddingHandler output should be list")
-        batch_output.outputs = [x[embedding_type.value] for x in batch_output.outputs]
+        batch_output.output = [x[embedding_type.value] for x in batch_output.output]
         return batch_output
 
     def extend_forward_args(self):

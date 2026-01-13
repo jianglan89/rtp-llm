@@ -103,6 +103,8 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                     const T*                       qkv_bias,
                                     const int*                     padding_offset,
                                     const int*                     cu_seqlens,
+                                    const bool                     use_rope_cache,
+                                    const float*                   rope_cache,
                                     const int                      batch_size,
                                     const int                      seq_len,
                                     const int                      token_num,
@@ -122,7 +124,8 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                     cudaStream_t                   stream);
 
 template<typename T>
-void invoke_debug_kernel2(T* data, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream);
+void invoke_debug_kernel2(
+    T* data, int strat_row, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream);
 
 #if USING_ROCM
 template<typename T>
@@ -147,8 +150,8 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
                                              T*                             k_buf,
                                              T*                             v_buf,
                                              PrefixPromptBatchWeightsParam* param,
-                                            T*                             QKV,
-                                            void*                          QuantizedQKV,
+                                             T*                             QKV,
+                                             void*                          QuantizedQKV,
                                              const int*                     position_ids,
                                              const T*                       qkv_bias,
                                              const int*                     padding_offset,
@@ -269,6 +272,7 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
                                           T*               QKV,
                                           const int*       position_ids,
                                           const T*         qkv_bias,
+                                          const bool       use_rope_cache,
                                           const float*     rope_cache,
                                           const int        batch_size,
                                           const int        head_num,
@@ -297,18 +301,18 @@ void invokeLoadPrefixKVCache(T*                             q_buf,
 
 #if USING_ROCM
 template<typename T>
-void invokeLoadPrefixKVCacheAiterV1(T*                           q_buf,
-                                  T*                             k_buf,
-                                  T*                             v_buf,
-                                  PrefixPromptBatchWeightsParam* param,
-                                  const int                      batch_size,
-                                  const int                      seq_len,
-                                  const int                      head_num,
-                                  const int                      head_num_kv,
-                                  const int                      size_per_head,
-                                  const float*                   scale,
-                                  const int                      int8_mode,
-                                  cudaStream_t                   stream);
+void invokeLoadPrefixKVCacheAiterV1(T*                             q_buf,
+                                    T*                             k_buf,
+                                    T*                             v_buf,
+                                    PrefixPromptBatchWeightsParam* param,
+                                    const int                      batch_size,
+                                    const int                      seq_len,
+                                    const int                      head_num,
+                                    const int                      head_num_kv,
+                                    const int                      size_per_head,
+                                    const float*                   scale,
+                                    const int                      int8_mode,
+                                    cudaStream_t                   stream);
 
 template<typename T>
 void invokeLoadPrefixKVCacheAiter(T*                             q_buf,

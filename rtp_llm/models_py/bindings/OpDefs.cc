@@ -3,25 +3,11 @@
 namespace torch_ext {
 
 void registerPyOpDefs(pybind11::module& m) {
-    pybind11::class_<MlaParams>(m, "MlaParams")
-        .def(pybind11::init<>())
-        .def_readonly("batch_indice", &MlaParams::batch_indice)
-        .def_readonly("positions", &MlaParams::positions)
-        .def_readonly("paged_kv_last_page_len", &MlaParams::paged_kv_last_page_len)
-        .def_readonly("kvlen", &MlaParams::kvlen)
-        .def_readonly("page_indice", &MlaParams::page_indice)
-        .def_readonly("reuse_cache_page_indice", &MlaParams::reuse_cache_page_indice)
-        .def_readonly("decode_page_indptr", &MlaParams::decode_page_indptr)
-        .def_readonly("prefill_page_indptr", &MlaParams::prefill_page_indptr)
-        .def_readonly("qo_indptr", &MlaParams::qo_indptr)
-        .def_readonly("batch_reuse_info_vec", &MlaParams::batch_reuse_info_vec);
-
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
-        .def_readwrite("k_cache_base", &KVCache::k_cache_base, "Key cache base tensor")
-        .def_readwrite("v_cache_base", &KVCache::v_cache_base, "Value cache base tensor")
-        .def_readwrite("k_scale_base", &KVCache::k_scale_base, "Key cache scale tensor")
-        .def_readwrite("v_scale_base", &KVCache::v_scale_base, "Value cache scale tensor")
+        .def_readwrite("kv_cache_base", &KVCache::kv_cache_base, "Key cache base tensor")
+        .def_readwrite("kv_scale_base", &KVCache::kv_scale_base, "Key cache scale tensor")
+        .def_readonly("seq_size_per_block", &KVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &KVCache::layer_id, "kv cache layer id")
         .def("get_layer_cache", &KVCache::getLayerCache);
 
@@ -59,21 +45,47 @@ void registerPyOpDefs(pybind11::module& m) {
             pybind11::arg("seq_size_per_block"),
             "Fill parameters for CUDA graph execution");
 
+    pybind11::class_<MlaParams, std::shared_ptr<MlaParams>, rtp_llm::ParamsBase>(m, "MlaParams")
+        .def(pybind11::init<>())
+        .def_readonly("batch_indice", &MlaParams::batch_indice)
+        .def_readonly("positions", &MlaParams::positions)
+        .def_readonly("paged_kv_last_page_len", &MlaParams::paged_kv_last_page_len)
+        .def_readonly("kvlen", &MlaParams::kvlen)
+        .def_readonly("page_indice", &MlaParams::page_indice)
+        .def_readonly("reuse_cache_page_indice", &MlaParams::reuse_cache_page_indice)
+        .def_readonly("decode_page_indptr", &MlaParams::decode_page_indptr)
+        .def_readonly("prefill_page_indptr", &MlaParams::prefill_page_indptr)
+        .def_readonly("qo_indptr", &MlaParams::qo_indptr)
+        .def_readonly("batch_reuse_info_vec", &MlaParams::batch_reuse_info_vec);
+
+    pybind11::class_<PyPrefillCudaGaphCopyParams>(m, "PyPrefillCudaGaphCopyParams")
+        .def(pybind11::init<>())
+        .def_readonly("cuda_graph_prefill_batch_size", &PyPrefillCudaGaphCopyParams::cuda_graph_prefill_batch_size)
+        .def_readonly("max_seq_len", &PyPrefillCudaGaphCopyParams::max_seq_len)
+        .def_readonly("max_batch_size", &PyPrefillCudaGaphCopyParams::max_batch_size);
+
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
-        .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readwrite("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
         .def_readwrite("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
-        .def_readwrite("kv_block_offset", &PyAttentionInputs::kv_block_offset)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
+        .def_readwrite("cu_kv_seqlens", &PyAttentionInputs::cu_kv_seqlens)
+        .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
+        .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
+        .def_readonly("prefix_lengths_d", &PyAttentionInputs::prefix_lengths_d)
+        .def_readonly("sequence_lengths_plus_1_d", &PyAttentionInputs::sequence_lengths_plus_1_d)
+        .def_readonly("input_lengths_d", &PyAttentionInputs::input_lengths_d)
+        .def_readonly("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
+        .def_readonly("decode_cu_seqlens_host", &PyAttentionInputs::decode_cu_seqlens_host)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
-        .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; });
+        .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
+        .def_readonly("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params);
 
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")
         .def(pybind11::init<>())
@@ -95,11 +107,13 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
-        .def(pybind11::init<torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
+        .def(pybind11::init<torch::Tensor, torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
              pybind11::arg("input_ids")             = torch::empty(0),
+             pybind11::arg("input_hiddens")         = torch::empty(0),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
+        .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");

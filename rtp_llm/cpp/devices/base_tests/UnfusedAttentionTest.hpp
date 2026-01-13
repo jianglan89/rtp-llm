@@ -85,13 +85,13 @@ TORCH_MODULE(AddFusedQKVBiasTranspose);
 class UnfusedAttentionTest: public DeviceTestBase {
 public:
 #ifdef USING_CUDA12
-    void prefillAddFusedQKVBiasTransposeTest(size_t batch_size,
-                                             size_t seq_len,
-                                             size_t num_heads,
-                                             size_t num_key_value_heads,
-                                             size_t head_dim,
-                                             size_t tokens_per_block,
-                                             bool   is_perf = false);
+    void addFusedQKVBiasTransposeTest(size_t batch_size,
+                                      size_t seq_len,
+                                      size_t num_heads,
+                                      size_t num_key_value_heads,
+                                      size_t head_dim,
+                                      size_t tokens_per_block,
+                                      bool   is_perf = false);
 
     void decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
                                             size_t seq_len,
@@ -105,13 +105,13 @@ public:
 };
 
 #ifdef USING_CUDA12
-void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size,
-                                                               size_t seq_len,
-                                                               size_t num_heads,
-                                                               size_t num_key_value_heads,
-                                                               size_t head_dim,
-                                                               size_t tokens_per_block,
-                                                               bool   is_perf) {
+void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
+                                                        size_t seq_len,
+                                                        size_t num_heads,
+                                                        size_t num_key_value_heads,
+                                                        size_t head_dim,
+                                                        size_t tokens_per_block,
+                                                        bool   is_perf) {
     AddFusedQKVBiasTranspose fused = AddFusedQKVBiasTranspose();
     fused.ptr()->to(torch::Device(torch::kCPU));
     auto               state_dict = fused.ptr()->named_parameters();
@@ -183,33 +183,36 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
     auto rope_config = RopeConfig({RopeStyle::Base, rope_dim, rope_theta, 1., 0., 0., max_position_embeddings});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto                 block_num = 2 * batch_size * ((seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16}));
-    cache_manager_            = nullptr;
-    auto kv_cache_block_id    = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
-    auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
-    auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
-    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
-    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
-    common_inputs.kv_cache    = KvCacheInfo(
-        {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
-    common_inputs.cu_seqlens          = cu_seqlens_device;
-    common_inputs.padding_offset      = padding_offset_device;
-    common_inputs.position_ids        = position_ids_device;
-    common_inputs.attention_mask      = attention_mask_device;
-    common_inputs.context_batch_size  = batch_size;
-    common_inputs.context_max_seq_len = seq_len;
-    common_inputs.decoder_batch_size  = 0;
-    common_inputs.decoder_max_seq_len = 0;
-    common_inputs.max_prefix_length   = 0;
+    auto block_num  = 2 * batch_size * ((seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
+    cache_manager_             = nullptr;
+    auto kv_cache_block_id     = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
+    auto kv_cache_buffer       = cache_manager_->kvCacheBuffer();
+    auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
+    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
+    common_inputs.kv_cache =
+        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
+    common_inputs.cu_seqlens                = cu_seqlens_device;
+    common_inputs.padding_offset            = padding_offset_device;
+    common_inputs.position_ids              = position_ids_device;
+    common_inputs.attention_mask            = attention_mask_device;
+    common_inputs.context_batch_size        = batch_size;
+    common_inputs.context_max_seq_len       = seq_len;
+    common_inputs.decoder_batch_size        = 0;
+    common_inputs.decoder_max_seq_len       = 0;
+    common_inputs.max_prefix_length         = 0;
 
     auto buffer_nullptr         = BufferPtr(nullptr);
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = std::make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, qkv_bias_device));
 
-    auto attention_config = AttentionConfigs(
-        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block});
+    AttentionConfigs attention_config;
+    attention_config.head_num         = num_heads;
+    attention_config.kv_head_num      = num_key_value_heads;
+    attention_config.size_per_head    = head_dim;
+    attention_config.rope_config      = rope_config;
+    attention_config.tokens_per_block = tokens_per_block;
 
     auto qkv_output = device->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
 
@@ -217,7 +220,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
         0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config};
 
     auto attn = device->prepareTrtAttn(
-        attention_config, kv_cache_buffer.k_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
+        attention_config, kv_cache_buffer.kv_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
     auto trt_attn = reinterpret_cast<TRTAttn*>(attn.get());
     TRTAttn::setKvCache(trt_attn->kv_block_array, *common_inputs.kv_cache);
 
@@ -241,7 +244,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
     auto seq_len_with_prefix = seq_len + params.common.max_prefix_length;
 
     auto qkv_buf_fp8 =
-        cache_conf.dtype == DataType::TYPE_FP8_E4M3 ?
+        cache_conf.cache_specs[0]->dtype == DataType::TYPE_FP8_E4M3 ?
             device->allocateBuffer({DataType::TYPE_FP8_E4M3,
                                     {batch_size, (num_heads + num_key_value_heads * 2), seq_len_with_prefix, head_dim},
                                     AllocationType::DEVICE},
@@ -257,6 +260,8 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
     bool   store_qkv            = false;
     bool   store_q_no_transpose = false;
 
+    auto rope_cache = getRopeCacheOnce(rope_config, max_position_embeddings);
+
     if (is_perf) {
         bool store_q     = true;
         bool store_kv    = false;
@@ -268,36 +273,39 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
 
         // warm up
         for (int i = 0; i < 3; ++i) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
-                                             invokeAddFusedQKVBiasTranspose,
-                                             q_no_transpose_output->data(),
-                                             q_output->data(),
-                                             k_output->data(),
-                                             v_output->data(),
-                                             &prefix_prompt_param,
-                                             params.input.data(),
-                                             qkv_buf_fp8 ? qkv_buf_fp8->data() : nullptr,
-                                             params.common.position_ids->data<int>(),
-                                             params.weights.qkv_weight->bias->data(),
-                                             params.common.padding_offset->data<int>(),
-                                             params.common.cu_seqlens->data<int>(),
-                                             batch_size,
-                                             seq_len,
-                                             token_num,
-                                             num_heads,
-                                             num_key_value_heads,
-                                             head_dim,
-                                             params.configs.rope_config,
-                                             params.configs.use_logn_attn,
-                                             scale_out_ptr,
-                                             int8_mode,
-                                             use_paged_fmha,
-                                             store_qkv,
-                                             store_q_no_transpose,
-                                             store_q,
-                                             store_kv,
-                                             store_cache,
-                                             device->getStream());
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+                params.input.type(),
+                invokeAddFusedQKVBiasTranspose,
+                q_no_transpose_output->data(),
+                q_output->data(),
+                k_output->data(),
+                v_output->data(),
+                &prefix_prompt_param,
+                params.input.data(),
+                qkv_buf_fp8 ? qkv_buf_fp8->data() : nullptr,
+                params.common.position_ids->data<int>(),
+                nullptr,  // params.weights.qkv_weight->bias->data()
+                params.common.padding_offset->data<int>(),
+                params.common.cu_seqlens->data<int>(),
+                rope_cache.used,
+                checkRopeCache(rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
+                batch_size,
+                seq_len,
+                token_num,
+                num_heads,
+                num_key_value_heads,
+                head_dim,
+                params.configs.rope_config,
+                params.configs.use_logn_attn,
+                scale_out_ptr,
+                int8_mode,
+                use_paged_fmha,
+                store_qkv,
+                store_q_no_transpose,
+                store_q,
+                store_kv,
+                store_cache,
+                device->getStream());
         }
 
         device->syncAndCheck();
@@ -307,36 +315,39 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
         cudaEventRecord(start, device->getStream());
 
         for (int i = 0; i < iters; ++i) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
-                                             invokeAddFusedQKVBiasTranspose,
-                                             q_no_transpose_output->data(),
-                                             q_output->data(),
-                                             k_output->data(),
-                                             v_output->data(),
-                                             &prefix_prompt_param,
-                                             params.input.data(),
-                                             qkv_buf_fp8 ? qkv_buf_fp8->data() : nullptr,
-                                             params.common.position_ids->data<int>(),
-                                             params.weights.qkv_weight->bias->data(),
-                                             params.common.padding_offset->data<int>(),
-                                             params.common.cu_seqlens->data<int>(),
-                                             batch_size,
-                                             seq_len,
-                                             token_num,
-                                             num_heads,
-                                             num_key_value_heads,
-                                             head_dim,
-                                             params.configs.rope_config,
-                                             params.configs.use_logn_attn,
-                                             scale_out_ptr,
-                                             int8_mode,
-                                             use_paged_fmha,
-                                             store_qkv,
-                                             store_q_no_transpose,
-                                             store_q,
-                                             store_kv,
-                                             store_cache,
-                                             device->getStream());
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+                params.input.type(),
+                invokeAddFusedQKVBiasTranspose,
+                q_no_transpose_output->data(),
+                q_output->data(),
+                k_output->data(),
+                v_output->data(),
+                &prefix_prompt_param,
+                params.input.data(),
+                qkv_buf_fp8 ? qkv_buf_fp8->data() : nullptr,
+                params.common.position_ids->data<int>(),
+                nullptr,  // params.weights.qkv_weight->bias->data()
+                params.common.padding_offset->data<int>(),
+                params.common.cu_seqlens->data<int>(),
+                rope_cache.used,
+                checkRopeCache(rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
+                batch_size,
+                seq_len,
+                token_num,
+                num_heads,
+                num_key_value_heads,
+                head_dim,
+                params.configs.rope_config,
+                params.configs.use_logn_attn,
+                scale_out_ptr,
+                int8_mode,
+                use_paged_fmha,
+                store_qkv,
+                store_q_no_transpose,
+                store_q,
+                store_kv,
+                store_cache,
+                device->getStream());
         }
 
         cudaEventRecord(stop, device->getStream());
@@ -345,7 +356,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
         cudaEventElapsedTime(&total_time, start, stop);
 
         float time = total_time / iters;
-        std::cout << "prefillAddFusedQKVBiasTransposeTest perf time: " << time << ", batch_size: " << batch_size
+        std::cout << "addFusedQKVBiasTransposeTest perf time: " << time << ", batch_size: " << batch_size
                   << ", seq_q: " << seq_len << ", head_q: " << num_heads << ", head_kv: " << num_key_value_heads
                   << ", head_dim: " << head_dim << ", tokens_per_block: " << tokens_per_block << std::endl;
 
@@ -369,6 +380,9 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
                                          params.weights.qkv_weight->bias->data(),
                                          params.common.padding_offset->data<int>(),
                                          params.common.cu_seqlens->data<int>(),
+                                         rope_cache.used,
+                                         checkRopeCache(rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() :
+                                                                                   nullptr,
                                          batch_size,
                                          seq_len,
                                          token_num,
@@ -489,17 +503,16 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
     auto rope_config = RopeConfig({RopeStyle::Base, rope_dim, rope_theta, 1., 0., 0., max_position_embeddings});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto block_num = 2 * batch_size * ((kv_seq_len + seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16}));
-    cache_manager_            = nullptr;
-    auto kv_cache_block_id    = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
-    auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
-    auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
-    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
-    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
-    common_inputs.kv_cache    = KvCacheInfo(
-        {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+    auto block_num  = 2 * batch_size * ((kv_seq_len + seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
+    cache_manager_             = nullptr;
+    auto kv_cache_block_id     = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
+    auto kv_cache_buffer       = cache_manager_->kvCacheBuffer();
+    auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
+    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
+    common_inputs.kv_cache =
+        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
     common_inputs.cu_seqlens          = cu_seqlens_device;
     common_inputs.position_ids        = position_ids_device;
     common_inputs.attention_mask      = attention_mask_device;
@@ -513,8 +526,12 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = std::make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, qkv_bias_device));
 
-    auto attention_config = AttentionConfigs(
-        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block});
+    AttentionConfigs attention_config;
+    attention_config.head_num         = num_heads;
+    attention_config.kv_head_num      = num_key_value_heads;
+    attention_config.size_per_head    = head_dim;
+    attention_config.rope_config      = rope_config;
+    attention_config.tokens_per_block = tokens_per_block;
 
     auto qkv_output = device->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
 
@@ -522,7 +539,7 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
         0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config};
 
     auto attn = device->prepareTrtAttn(
-        attention_config, kv_cache_buffer.k_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
+        attention_config, kv_cache_buffer.kv_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
     auto trt_attn = reinterpret_cast<TRTAttn*>(attn.get());
     TRTAttn::setKvCache(trt_attn->kv_block_array, *common_inputs.kv_cache);
 
@@ -537,7 +554,7 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
         {params.input.type(), {batch_size, num_key_value_heads, seq_len, head_dim}, AllocationType::DEVICE},
         {"v_output"});
 
-    auto rope_cache = getRopeCache(rope_config, max_position_embeddings);
+    auto rope_cache = getRopeCacheOnce(rope_config, max_position_embeddings);
 
     if (is_perf) {
         bool store_q     = true;
@@ -550,26 +567,28 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
 
         // warm up
         for (int i = 0; i < 3; ++i) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
-                                             invokeDecodeAddFusedQKVBiasTranspose,
-                                             q_output->data(),
-                                             k_output->data(),
-                                             v_output->data(),
-                                             trt_attn->kv_block_array,
-                                             params.input.data(),
-                                             params.common.position_ids->data<int>(),
-                                             params.weights.qkv_weight->bias->data(),
-                                             rope_cache.data_ptr<float>(),
-                                             batch_size,
-                                             num_heads,
-                                             num_key_value_heads,
-                                             head_dim,
-                                             params.configs.rope_config,
-                                             params.configs.use_logn_attn,
-                                             store_q,
-                                             store_kv,
-                                             store_cache,
-                                             device->getStream());
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+                params.input.type(),
+                invokeDecodeAddFusedQKVBiasTranspose,
+                q_output->data(),
+                k_output->data(),
+                v_output->data(),
+                trt_attn->kv_block_array,
+                params.input.data(),
+                params.common.position_ids->data<int>(),
+                nullptr,  // params.weights.qkv_weight->bias->data()
+                rope_cache.used,
+                checkRopeCache(rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
+                batch_size,
+                num_heads,
+                num_key_value_heads,
+                head_dim,
+                params.configs.rope_config,
+                params.configs.use_logn_attn,
+                store_q,
+                store_kv,
+                store_cache,
+                device->getStream());
         }
 
         device->syncAndCheck();
@@ -579,26 +598,28 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
         cudaEventRecord(start, device->getStream());
 
         for (int i = 0; i < iters; ++i) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
-                                             invokeDecodeAddFusedQKVBiasTranspose,
-                                             q_output->data(),
-                                             k_output->data(),
-                                             v_output->data(),
-                                             trt_attn->kv_block_array,
-                                             params.input.data(),
-                                             params.common.position_ids->data<int>(),
-                                             params.weights.qkv_weight->bias->data(),
-                                             rope_cache.data_ptr<float>(),
-                                             batch_size,
-                                             num_heads,
-                                             num_key_value_heads,
-                                             head_dim,
-                                             params.configs.rope_config,
-                                             params.configs.use_logn_attn,
-                                             store_q,
-                                             store_kv,
-                                             store_cache,
-                                             device->getStream());
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+                params.input.type(),
+                invokeDecodeAddFusedQKVBiasTranspose,
+                q_output->data(),
+                k_output->data(),
+                v_output->data(),
+                trt_attn->kv_block_array,
+                params.input.data(),
+                params.common.position_ids->data<int>(),
+                nullptr,  // params.weights.qkv_weight->bias->data()
+                rope_cache.used,
+                checkRopeCache(rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
+                batch_size,
+                num_heads,
+                num_key_value_heads,
+                head_dim,
+                params.configs.rope_config,
+                params.configs.use_logn_attn,
+                store_q,
+                store_kv,
+                store_cache,
+                device->getStream());
         }
 
         cudaEventRecord(stop, device->getStream());
@@ -628,7 +649,9 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
                                          params.input.data(),
                                          params.common.position_ids->data<int>(),
                                          params.weights.qkv_weight->bias->data(),
-                                         rope_cache.data_ptr<float>(),
+                                         rope_cache.used,
+                                         checkRopeCache(rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() :
+                                                                                   nullptr,
                                          batch_size,
                                          num_heads,
                                          num_key_value_heads,

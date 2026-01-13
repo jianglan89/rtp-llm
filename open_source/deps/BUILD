@@ -24,8 +24,15 @@ py_package(
 )
 
 py_library(
+    name = "extension_frontend_lib",
+    deps = [],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "extension_lib",
     deps = [],
+    visibility = ["//visibility:public"],
 )
 
 compile_pip_requirements(
@@ -34,15 +41,6 @@ compile_pip_requirements(
     extra_args = PIP_EXTRA_ARGS,
     extra_data = ["//open_source/deps:requirements_base.txt"],
     requirements_txt = "requirements_lock_torch_cpu.txt",
-    tags = ["manual"],
-)
-
-compile_pip_requirements(
-    name = "requirements_torch_gpu",
-    src = "requirements_torch_gpu.txt",
-    extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["//open_source/deps:requirements_base.txt"],
-    requirements_txt = "requirements_lock_torch_gpu.txt",
     tags = ["manual"],
 )
 

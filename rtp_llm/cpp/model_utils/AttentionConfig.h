@@ -1,27 +1,9 @@
 #pragma once
 
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
+#include <c10/core/ScalarType.h>
 
 namespace rtp_llm {
-
-enum class FMHAType {
-    FLASH_INFER,
-    NONE,
-    OPEN_SOURCE,
-    PAGED_OPEN_SOURCE,
-    PAGED_TRT_V2,
-    TRT_V1,
-    TRT_V2,
-    XQA,
-    AITER_PREFILL,
-    AITER_DECODE
-};
-
-enum AttentionMaskType {
-    // ones matrix, for bert model.
-    noMask,
-    causalMask,
-};
 
 enum class KvCacheDataType : int8_t {
     BASE = 0,
@@ -45,18 +27,17 @@ struct AttentionConfigs {
     size_t head_num;
     size_t kv_head_num;
     size_t size_per_head;
-    size_t hidden_size;
 
     // rotary embending config
     RopeConfig rope_config;
 
     // kv cache block
-    size_t tokens_per_block;
+    size_t tokens_per_block = 8;
 
-    AttentionMaskType mask_type         = noMask;
-    float             q_scaling         = 1.0f;
-    bool              fuse_qkv_add_bias = true;
-    bool              use_logn_attn     = false;
+    float q_scaling         = 1.0f;
+    bool  fuse_qkv_add_bias = true;
+    bool  use_logn_attn     = false;
+    bool  is_causal         = true;
 
     // mla config
     bool   use_mla = false;
@@ -70,6 +51,9 @@ struct AttentionConfigs {
     float           softmax_extra_scale  = 1.0f;
     KvCacheDataType kv_cache_dtype       = KvCacheDataType::BASE;
     bool            skip_append_kv_cache = false;
+
+    // data type for attention computation
+    c10::ScalarType dtype = c10::ScalarType::Half;
 
 public:
     std::string DebugAttentionConfigStr() const;

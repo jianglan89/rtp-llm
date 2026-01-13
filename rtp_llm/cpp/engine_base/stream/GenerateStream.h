@@ -6,9 +6,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
-#include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
@@ -35,6 +33,19 @@ struct StreamUpdateInfo {
     bool                     update_remote_generate = true;
     bool                     force_update_info      = false;
 };
+
+struct StreamSpecUpdateInfo {
+    const rtp_llm::BufferPtr new_tokens;
+    int                      num_new_tokens;
+
+    int                      draft_token;
+    const rtp_llm::BufferPtr draft_hidden_states;
+    const rtp_llm::BufferPtr draft_token_probs;
+
+    bool update_remote_generate = true;
+    bool force_update_info      = false;
+};
+
 struct SpeculativeExecutorStreamOutput {
 public:
     std::string debugString() const {
@@ -67,6 +78,9 @@ public:
     rtp_llm::BufferPtr loss          = nullptr;
     rtp_llm::BufferPtr all_probs     = nullptr;
     rtp_llm::BufferPtr softmax_probs = nullptr;
+
+    // hold tensors from grpc
+    std::vector<torch::Tensor> tensors_holder;
 };
 using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorStreamOutput>;
 
@@ -77,7 +91,8 @@ using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
 class GenerateStream {
 public:
     GenerateStream(const std::shared_ptr<GenerateInput>& query,
-                   const rtp_llm::GptInitParameter&      params,
+                   const ModelConfig&                    model_config,
+                   const RuntimeConfig&                  runtime_config,
                    const ResourceContext&                resource_context,
                    kmonitor::MetricsReporterPtr          metrics_reporter,
                    size_t                                extra_reserve_token_num = 0,
@@ -88,12 +103,12 @@ public:
     }
 
 public:
-    void setIsDummyStream(bool is_dummy) {
-        is_dummy_stream = is_dummy;
+    void setIsFakeStream(bool is_fake) {
+        is_fake_stream_ = is_fake;
     }
 
-    bool isDummyStream() const {
-        return is_dummy_stream;
+    bool isFakeStream() const {
+        return is_fake_stream_;
     }
 
     // Exported to python world.
@@ -106,24 +121,28 @@ public:
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
+    void         specUpdate(const StreamSpecUpdateInfo& update_info);
     bool         updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_indices);
 
     virtual size_t scoreLen() const {
-        return 1;
+        return score_len_ == 0 ? 1 : score_len_;
+    }
+
+    void setScoreLen(size_t score_len) {
+        score_len_ = score_len;
     }
 
     // Only used in C++ world.
-    int                         reuseBlockSize() const;
-    void                        fakeInitKVBlock();
-    virtual absl::StatusOr<int> initKVBlock(int token_capacity, size_t reserve_step = 0);
-    virtual absl::StatusOr<int> incrKVBlock(int token_capacity, size_t reserve_step = 0);
-    virtual int                 tryReleaseKVBlock(int nums);
-    virtual void                releaseResource();
-    int                         nextNeedBlockNums(size_t reserve_step) const;
-    void                        setNeedReleaseResource(bool need_release_resource);
-    void                        incrFallbackBlock(int fallback_blocks);
-    bool                        hasCacheKeys() const;
-    const std::vector<int64_t>& cacheKeys(int32_t batch_id = 0) const;
+    int                  reuseBlockSize() const;
+    void                 fakeInitKVBlock();
+    virtual absl::Status initKVBlock(size_t reserve_step = 0);
+    virtual absl::Status incrKVBlock(size_t reserve_step = 0);
+    virtual int          tryReleaseKVBlock(int nums);
+    virtual void         releaseResource();
+    int                  nextNeedBlockNums(size_t reserve_step) const;
+    void                 setNeedReleaseResource(bool need_release_resource);
+    bool                 hasCacheKeys() const;
+    const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
 
     std::shared_ptr<GenerateInput>   generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;
@@ -176,23 +195,19 @@ public:
     int    localReuseLength() const;
     int    remoteReuseLength() const;
     void   setInitialReuseLength(int initial_reuse_length);
-    int    fallbackPrefixLength() const;
-    void   setFallbackPrefixLength(int fallback_prefix_length);
     void   incLastOutputPos();
 
-    absl::StatusOr<int> acquireCapacity(int token_capacity);
-    int                 currentChunkLen() const;
-    void                resetChunkLen(int chunck_len, int max_chunk_len);
-
     bool                      isContextStream() const;
-    bool                      isChunkStream() const;
     const rtp_llm::BufferPtr& cumLogProbs() const;
 
-    const rtp_llm::BufferPtr& completeTokenIds();
-    std::vector<int>          completeTokenIdsVec(int batch_idx = 0);
-    std::vector<int>          commonCompleteTokenIdsVec(int batch_idx = 0);
-    int                       currentExecuteTokenSize();
-    std::vector<int>          currentExecuteTokens(int batch_idx = 0) const;
+    const rtp_llm::BufferPtr&         completeTokenIds();
+    std::shared_ptr<CompleteTokenIds> completeTokenIdsPtr() const {
+        return complete_token_ids_;
+    }
+    std::vector<int> completeTokenIdsVec(int batch_idx = 0);
+    std::vector<int> commonCompleteTokenIdsVec(int batch_idx = 0);
+    int              currentExecuteTokenSize();
+    std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
     void step();
     void spStep();
@@ -221,6 +236,7 @@ public:
     bool         finishedWithoutLock();
     void         cancelIfNotRunning();
     void         setFinishedWithoutLock();
+    bool         isRemoteRunningWithoutLock();
     bool         needRemoteGenerate() const;
     bool         setRemoteGenerate();
     size_t       iterCount() const;
@@ -232,7 +248,9 @@ public:
     void                        setLoss(const rtp_llm::Buffer& loss);
     void                        setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos);
     const BatchKVCacheResource& kvCache() const;
-    size_t                      maxBlockSize() const;
+    BatchKVCacheResource&       kvCacheMutable();
+    BatchKVCacheResourcePtr     kvCachePtr();
+    size_t                      curBlocksNum() const;
 
     bool needFinish();
     bool needFinishBySPTokens();
@@ -257,9 +275,8 @@ public:
     rtp_llm::BufferPtr   getSoftmaxProbs();
     StreamCacheResource& streamCacheResource();
     void                 setPerfTest(bool perf_test_);
-
-    absl::Status releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
-        return stream_cache_resource_->releaseSequenceKVCache(total_seq_len, release_seq_len);
+    bool                 isPerfTest() const {
+        return perf_test_;
     }
 
     void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true, bool share = false);
@@ -362,7 +379,7 @@ public:
         sp_edit_first_time_ = sp_edit_first_time;
     }
 
-    void setProposeToken(std::vector<int>& propose_token) {
+    void setProposeToken(const std::vector<int>& propose_token) {
         propose_token_ = propose_token;
     }
 
@@ -409,21 +426,12 @@ public:
         return generate_input_->generate_config->trace_id;
     }
 
-    ThinkModeLogitsProcessorPtr getThinkLogitsProcessor() {
-        return think_logits_processor_ptr_;
-    }
-
-    TreeLogitsProcessorPtr getTreeLogitsProcessor() {
-        return tree_logits_processor_ptr_;
-    }
-
-    MultiSeqLogitsProcessorPtr getMultiSeqLogitsProcessor() {
-        return multi_seq_logits_processor_ptr_;
-    }
-
-    void                                initializeLogitsProcessorList();
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
+    }
+
+    at::Generator getGenerator() {
+        return generator_;
     }
 
     rtp_llm::BufferPtr getProposeTokens() const {
@@ -511,27 +519,20 @@ protected:
     int64_t                              wait_time_us_  = 0;
     std::shared_ptr<StreamCacheResource> stream_cache_resource_;
     std::shared_ptr<bool>                is_context_stream_;
-    size_t                               iter_count_             = 0;
-    size_t                               sp_iter_count_          = 0;
-    size_t                               last_output_pos_        = 0;
-    int                                  initial_reuse_length_   = 0;
-    int                                  reuse_length_           = 0;
-    int                                  local_reuse_length_     = 0;
-    int                                  remote_reuse_length_    = 0;
-    int                                  reuse_mm_length_        = 0;
-    int                                  fallback_blocks_        = 0;
-    int                                  fallback_times_         = 0;
-    int                                  fallback_prefix_length_ = 0;
+    size_t                               iter_count_           = 0;
+    size_t                               sp_iter_count_        = 0;
+    size_t                               last_output_pos_      = 0;
+    int                                  initial_reuse_length_ = 0;
+    int                                  reuse_length_         = 0;
+    int                                  local_reuse_length_   = 0;
+    int                                  remote_reuse_length_  = 0;
+    int                                  reuse_mm_length_      = 0;
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
     bool released_              = false;
     bool need_release_resource_ = true;
 
-    bool enable_fast_gen_   = false;
-    bool return_all_probs_  = false;
-    int  current_chunk_len_ = 0;
-    int  last_chunk_len_    = 0;
-    int  max_chunk_len_     = 0;
+    bool return_all_probs_ = false;
 
     bool          last_block_aligned_   = false;
     volatile bool need_remote_generate_ = false;
@@ -575,15 +576,13 @@ protected:
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;
 
-    ThinkModeLogitsProcessorPtr         think_logits_processor_ptr_;
-    TreeLogitsProcessorPtr              tree_logits_processor_ptr_;
-    MultiSeqLogitsProcessorPtr          multi_seq_logits_processor_ptr_;
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
+    at::Generator                       generator_;
 
     // just for bool test
     bool perf_test_ = false;
     friend class StreamCacheResource;
-    bool is_dummy_stream = false;
+    bool is_fake_stream_ = false;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

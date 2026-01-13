@@ -361,7 +361,7 @@ bool FlashInferAttnParams::check(rtp_llm::DeviceBase*             device,
             || (attn_configs.kv_cache_dtype != KvCacheDataType::BASE
                 && attn_configs.kv_cache_dtype != KvCacheDataType::FP8)
             || (attn_configs.rope_config.style != RopeStyle::Base && attn_configs.rope_config.style != RopeStyle::No)
-            || attn_configs.mask_type != causalMask || attn_configs.q_scaling != 1.0f || attn_configs.use_logn_attn
+            || !attn_configs.is_causal || attn_configs.q_scaling != 1.0f || attn_configs.use_logn_attn
             || (size_per_head != 64 && size_per_head != 128 && size_per_head != 192)
             || (!is_prefill && group_size > 10 && group_size != 16 && group_size != 12)) {
             return false;
@@ -490,8 +490,8 @@ void FlashInferAttnParams::run(const AttentionModuleParams& params,
                                int64_t                      stream) {
     const int size_per_head = params.configs.size_per_head;
     auto      q             = Buffer2torchTensor(input_q, false);
-    auto      k_cache       = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false).select(1, 0);
-    auto      v_cache       = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false).select(1, 1);
+    auto      k_cache       = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
+    auto      v_cache       = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
 
     auto       softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
     at::Tensor out;

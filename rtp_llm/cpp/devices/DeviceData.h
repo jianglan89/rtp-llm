@@ -3,7 +3,8 @@
 #include <stddef.h>
 #include <string>
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
@@ -25,7 +26,6 @@ enum class MicroBatchType {
 struct DeviceInitParams {
     DeviceType device_type;
     size_t     device_id               = 0;
-    size_t     max_batch_size          = 256;
     size_t     max_generate_batch_size = 128;
 
     size_t tp_rank        = 0;
@@ -79,12 +79,12 @@ struct DeviceInitParams {
     FMHAConfig                   fmha_config;
     HWKernelConfig               hw_kernel_config;
     DeviceResourceConfig         device_resource_config;
-    SamplerConfig                sampler_config;
     MoeConfig                    moe_config;
     SpeculativeExecutionConfig   sp_config;
-    FIFOSchedulerConfig          fifo_scheduler_config;
+    // FIFOSchedulerConfig fields are now in RuntimeConfig
+    RuntimeConfig                runtime_config;
     MiscellaneousConfig          misc_config;
-    ParallelismDistributedConfig parallelism_distributed_config;
+    ParallelismConfig parallelism_config;
     ProfilingDebugLoggingConfig  profile_debug_logging_config;
     ModelSpecificConfig          model_specific_config;
     ConcurrencyConfig            concurrency_config;

@@ -3,7 +3,7 @@ import functools
 import json
 import logging
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import torch
 from typing_extensions import override
@@ -34,7 +34,7 @@ from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
     QwenReasoningToolRenderer,
 )
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
-from rtp_llm.utils.word_util import is_truncated, truncate_response_with_stop_words
+from rtp_llm.utils.word_util import truncate_response_with_stop_words
 
 TOOL_DESC = """{name_for_model}: Call this tool to interact with the {name_for_human} API. What is the {name_for_human} API useful for? {description_for_model} Parameters: {parameters}"""
 
@@ -186,12 +186,35 @@ def make_context(
 
 
 class QwenRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
-        super().__init__(tokenizer, renderer_params)
+    def __init__(
+        self,
+        tokenizer: BaseTokenizer,
+        renderer_params: RendererParams,
+        generate_env_config,
+        render_config=None,
+        ckpt_path=None,
+        misc_config=None,
+        vit_config=None,
+    ):
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
         self.add_extra_stop_word_ids([[37763, 367, 25], [151643]])  # Observation:
 
         self.qwen_reasoning_tool_renderer = QwenReasoningToolRenderer(
-            tokenizer, renderer_params
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
         )
 
         self.template_chat_renderer: Optional[BasicRenderer] = None
@@ -201,7 +224,15 @@ class QwenRenderer(CustomChatRenderer):
                     f"qwen model has chat_template [{tokenizer.chat_template}], "
                     "which will be used for non-function call dialogue."
                 )
-                self.template_chat_renderer = BasicRenderer(tokenizer, renderer_params)
+                self.template_chat_renderer = BasicRenderer(
+                    tokenizer,
+                    renderer_params,
+                    generate_env_config,
+                    render_config,
+                    ckpt_path,
+                    misc_config,
+                    vit_config,
+                )
         except AttributeError:
             pass
 
@@ -439,18 +470,35 @@ class QwenRenderer(CustomChatRenderer):
             return await self._create_empty_delta(output.aux_info)
         if status.generating_function_call:
             return await self._create_empty_delta(output.aux_info)
-        if is_truncated(status.total_output_string, stop_words_str, is_streaming):
-            status.finish_reason = FinisheReason.stop
-            return await self._create_empty_delta(output.aux_info)
+
+        # Process stop words on total_output_string
+        status.total_output_string, _ = self._process_stop_words(
+            status.total_output_string,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+            status,
+        )
+
         if len(status.total_output_string) > status.responded_length + len("\nAction:"):
             status.delta_output_string = status.total_output_string[
                 status.responded_length : status.output_length - len("\nAction:")
             ]
-            if is_truncated(
-                status.delta_output_string, stop_word_slice_list, is_streaming, True
-            ):
+
+            # Check delta for partial stop word buffering
+            _, should_buffer = self._process_stop_words(
+                status.delta_output_string,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
+                status,
+            )
+
+            if should_buffer:
                 return await self._create_empty_delta(output.aux_info)
-            else:
+
+            # Build delta output
+            if len(status.delta_output_string) > 0:
                 status.update_result()
                 return OutputDelta(
                     status.delta_output_string,
@@ -578,18 +626,35 @@ class QwenRenderer(CustomChatRenderer):
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
         if status.generating_function_call:
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
-        if is_truncated(status.total_output_string, stop_words_str, is_streaming):
-            status.finish_reason = FinisheReason.stop
-            return self._create_empty_delta_sync(input_len, output_len, reuse_len)
+
+        # Process stop words on total_output_string
+        status.total_output_string, _ = self._process_stop_words(
+            status.total_output_string,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+            status,
+        )
+
         if len(status.total_output_string) > status.responded_length + len("\nAction:"):
             status.delta_output_string = status.total_output_string[
                 status.responded_length : status.output_length - len("\nAction:")
             ]
-            if is_truncated(
-                status.delta_output_string, stop_word_slice_list, is_streaming, True
-            ):
+
+            # Check delta for partial stop word buffering
+            _, should_buffer = self._process_stop_words(
+                status.delta_output_string,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
+                status,
+            )
+
+            if should_buffer:
                 return self._create_empty_delta_sync(input_len, output_len, reuse_len)
-            else:
+
+            # Build delta output
+            if len(status.delta_output_string) > 0:
                 status.update_result()
                 return OutputDelta(
                     output_str=status.delta_output_string,
@@ -693,3 +758,4 @@ register_renderer("qwen_13b", QwenRenderer)
 register_renderer("qwen_1b8", QwenRenderer)
 register_renderer("qwen_2", QwenRenderer)
 register_renderer("qwen_2_moe", QwenRenderer)
+register_renderer("qwen3_next", QwenRenderer)

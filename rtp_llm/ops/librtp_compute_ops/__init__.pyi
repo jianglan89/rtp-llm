@@ -3,7 +3,7 @@ import libth_transformer_config
 import torch
 import typing
 from . import rtp_llm_ops
-__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'MlaParams', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'TypeMeta', 'get_device', 'init_device', 'rtp_llm_ops']
+__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'MlaParams', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_typemeta', 'init_device', 'rtp_llm_ops']
 class BertEmbeddingInputs:
     @typing.overload
     def __init__(self) -> None:
@@ -58,15 +58,9 @@ class DeviceExporter:
         ...
     def get_device_type(self) -> DeviceType:
         ...
-    def pack_int8_tensor_to_packed_int4(self, weight: torch.Tensor) -> torch.Tensor:
-        ...
     def preprocess_gemm_weight_by_key(self, key: str, weight: torch.Tensor, user_arm_gemm_use_kai: bool) -> torch.Tensor:
         ...
     def preprocess_weight_scale(self, weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        ...
-    def preprocess_weights_for_mixed_gemm(self, weight: torch.Tensor, quant_type: typing.Any, arch: str) -> torch.Tensor:
-        ...
-    def symmetric_quantize_last_axis_of_batched_matrix(self, weight: torch.Tensor, quant_type: typing.Any, arch: str) -> list[torch.Tensor]:
         ...
     def update_current_torch_stream(self) -> None:
         ...
@@ -125,38 +119,56 @@ class KVCache:
     def get_layer_cache(self, arg0: int) -> KVCache:
         ...
     @property
-    def k_cache_base(self) -> torch.Tensor:
+    def kv_cache_base(self) -> torch.Tensor:
         """
         Key cache base tensor
         """
-    @k_cache_base.setter
-    def k_cache_base(self, arg0: torch.Tensor) -> None:
+    @kv_cache_base.setter
+    def kv_cache_base(self, arg0: torch.Tensor) -> None:
         ...
     @property
-    def k_scale_base(self) -> torch.Tensor:
+    def kv_scale_base(self) -> torch.Tensor:
         """
         Key cache scale tensor
         """
+    @kv_scale_base.setter
+    def kv_scale_base(self, arg0: torch.Tensor) -> None:
+        ...
+
     @property
     def layer_id(self) -> int:
         """
         kv cache layer id
         """
     @property
+    def seq_size_per_block(self) -> int:
+        """
+        Sequence size per block
+        """
+    @property
     def v_cache_base(self) -> torch.Tensor:
         """
         Value cache base tensor
         """
+    @v_cache_base.setter
+    def v_cache_base(self, arg0: torch.Tensor) -> None:
+        ...
     @property
     def v_scale_base(self) -> torch.Tensor:
         """
         Value cache scale tensor
         """
-class MlaParams:
+class MlaParams(ParamsBase):
     def __init__(self) -> None:
         ...
     @property
     def batch_indice(self) -> torch.Tensor:
+        ...
+    @property
+    def batch_reuse_info_vec(self) -> torch.Tensor:
+        ...
+    @property
+    def decode_page_indptr(self) -> torch.Tensor:
         ...
     @property
     def kvlen(self) -> torch.Tensor:
@@ -165,16 +177,19 @@ class MlaParams:
     def page_indice(self) -> torch.Tensor:
         ...
     @property
-    def page_indptr(self) -> torch.Tensor:
-        ...
-    @property
     def paged_kv_last_page_len(self) -> torch.Tensor:
         ...
     @property
     def positions(self) -> torch.Tensor:
         ...
     @property
+    def prefill_page_indptr(self) -> torch.Tensor:
+        ...
+    @property
     def qo_indptr(self) -> torch.Tensor:
+        ...
+    @property
+    def reuse_cache_page_indice(self) -> torch.Tensor:
         ...
 class ParamsBase:
     def __init__(self) -> None:
@@ -184,32 +199,40 @@ class ParamsBase:
         Fill parameters for CUDA graph execution
         """
 class PyAttentionInputs:
+    cache_store_inputs: PyCacheStoreInputs | None
+    context_total_kv_length: int
+    cu_kv_seqlens: torch.Tensor
+    cu_seqlens: torch.Tensor
+    dtype: TypeMeta
     input_lengths: torch.Tensor
     is_prefill: bool
+    kv_cache_block_id_device: torch.Tensor
     kv_cache_block_id_host: torch.Tensor
+    padding_offset: torch.Tensor
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
+    total_tokens: int
     def __init__(self) -> None:
         ...
     def __repr__(self) -> str:
         ...
     @property
-    def cache_store_inputs(self) -> PyCacheStoreInputs | None:
+    def decode_cu_seqlens_d(self) -> torch.Tensor:
         ...
     @property
-    def cu_seqlens(self) -> torch.Tensor:
+    def decode_cu_seqlens_host(self) -> torch.Tensor:
         ...
     @property
-    def dtype(self) -> TypeMeta:
+    def input_lengths_d(self) -> torch.Tensor:
         ...
     @property
-    def kv_block_offset(self) -> int:
+    def prefill_cuda_graph_copy_params(self) -> PyPrefillCudaGaphCopyParams | None:
         ...
     @property
-    def kv_cache_block_id_device(self) -> torch.Tensor:
+    def prefix_lengths_d(self) -> torch.Tensor:
         ...
     @property
-    def padding_offset(self) -> torch.Tensor:
+    def sequence_lengths_plus_1_d(self) -> torch.Tensor:
         ...
 class PyCacheStoreInputs:
     def __init__(self) -> None:
@@ -230,7 +253,7 @@ class PyModelInputs:
     def __init__(self) -> None:
         ...
     @typing.overload
-    def __init__(self, input_ids: torch.Tensor = ..., attention_inputs: PyAttentionInputs = ..., bert_embedding_inputs: BertEmbeddingInputs = ...) -> None:
+    def __init__(self, input_ids: torch.Tensor = ..., input_hiddens: torch.Tensor = ..., attention_inputs: PyAttentionInputs = ..., bert_embedding_inputs: BertEmbeddingInputs = ...) -> None:
         ...
     @property
     def attention_inputs(self) -> PyAttentionInputs:
@@ -247,6 +270,14 @@ class PyModelInputs:
         """
     @bert_embedding_inputs.setter
     def bert_embedding_inputs(self, arg0: BertEmbeddingInputs) -> None:
+        ...
+    @property
+    def input_hiddens(self) -> torch.Tensor:
+        """
+        Input hidden states tensor
+        """
+    @input_hiddens.setter
+    def input_hiddens(self, arg0: torch.Tensor) -> None:
         ...
     @property
     def input_ids(self) -> torch.Tensor:
@@ -298,10 +329,26 @@ class PyModelOutputs:
     @params_ptr.setter
     def params_ptr(self, arg0: ParamsBase) -> None:
         ...
+class PyPrefillCudaGaphCopyParams:
+    def __init__(self) -> None:
+        ...
+    @property
+    def cuda_graph_prefill_batch_size(self) -> torch.Tensor:
+        ...
+    @property
+    def max_batch_size(self) -> int:
+        ...
+    @property
+    def max_seq_len(self) -> int:
+        ...
 class TypeMeta:
     def __init__(self) -> None:
         ...
 def get_device() -> DeviceExporter:
     ...
-def init_device(params: libth_transformer_config.GptInitParameter) -> None:
+def get_typemeta(arg0: torch.Tensor) -> TypeMeta:
+    """
+    Convert tensor dtype to TypeMeta
+    """
+def init_device(parallelism_config: libth_transformer_config.ParallelismConfig, model_config: libth_transformer_config.ModelConfig, eplb_config: libth_transformer_config.EPLBConfig, fmha_config: libth_transformer_config.FMHAConfig, device_resource_config: libth_transformer_config.DeviceResourceConfig, moe_config: libth_transformer_config.MoeConfig, sp_config: libth_transformer_config.SpeculativeExecutionConfig, misc_config: libth_transformer_config.MiscellaneousConfig, profiling_debug_logging_config: libth_transformer_config.ProfilingDebugLoggingConfig, hw_kernel_config: libth_transformer_config.HWKernelConfig, concurrency_config: libth_transformer_config.ConcurrencyConfig, ffn_disaggregate_config: libth_transformer_config.FfnDisAggregateConfig, runtime_config: libth_transformer_config.RuntimeConfig) -> None:
     ...

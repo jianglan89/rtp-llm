@@ -7,10 +7,10 @@ from typing import Dict, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.common.moe.fused_moe import FusedMoe
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 
-from .strategies.strategy_registry import StrategyRegistry
+from .defs.fused_moe import FusedMoe
+from .strategy_registry import StrategyRegistry
 
 
 class FusedMoeFactory:
@@ -29,8 +29,9 @@ class FusedMoeFactory:
     def set_registry(cls, r: StrategyRegistry):
         cls._registry = r
 
+    @torch.inference_mode()
     def create_fused_moe(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
     ) -> FusedMoe:
         """Create FusedMoe instance
 
@@ -38,7 +39,7 @@ class FusedMoeFactory:
         and creates corresponding Router and Executor.
 
         Args:
-            config: Model initialization parameters
+            config: MOE configuration adapter
             weights: Weight dictionary
 
         Returns:

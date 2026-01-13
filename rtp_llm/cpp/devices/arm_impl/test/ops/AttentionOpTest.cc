@@ -128,8 +128,11 @@ void ArmAttentionOpTest::contextAttentionOpTest(
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
-    auto attention_config =
-        AttentionConfigs({num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config});
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
 
     auto qkv_output = device_->allocateBuffer({qkv_input_device->type(), {batch_size, seq_len, num_heads, head_dim}});
     auto result_ref = attention->forward(query_states_host, key_states_host, value_states_host, attention_mask_host);
@@ -220,17 +223,20 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto rope_config = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto                 block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam{
-        1, (uint)block_num, (uint)num_heads, (uint)head_dim, (uint)tokensPerBlock, rtp_llm::TYPE_FP32});
-    cache_manager_            = nullptr;
-    auto kv_cache_block_id    = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
-    auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
-    auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
-    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
-    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
-    common_inputs.kv_cache    = KvCacheInfo(
-        {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+    auto block_num             = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
+    auto cache_conf            = makeMhaCacheConfig(1,
+                                         static_cast<uint>(block_num),
+                                         static_cast<uint>(num_heads),
+                                         static_cast<uint>(head_dim),
+                                         static_cast<uint>(tokensPerBlock),
+                                         rtp_llm::TYPE_FP32);
+    cache_manager_             = nullptr;
+    auto kv_cache_block_id     = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
+    auto kv_cache_buffer       = cache_manager_->kvCacheBuffer();
+    auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
+    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
+    common_inputs.kv_cache =
+        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
     common_inputs.context_batch_size  = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size  = batch_size;
@@ -241,8 +247,12 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
-    auto attention_config =
-        AttentionConfigs({num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokensPerBlock});
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
+    attention_config.tokens_per_block = tokensPerBlock;
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {batch_size, seq_len, num_heads, head_dim}});
     auto result_ref = attention->forward(

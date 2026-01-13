@@ -6,8 +6,9 @@
 #include <vector>
 
 #include "rtp_llm/cpp/utils/StringUtil.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "autil/legacy/jsonizable.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/config/SpecialTokens.h"
 
 namespace rtp_llm {
 
@@ -63,6 +64,7 @@ public:
     bool                          force_sp_accept          = false;
     bool                          return_all_probs         = false;
     bool                          return_softmax_probs     = false;
+    bool                          aux_info                 = true;
     std::vector<std::vector<int>> stop_words_list;
     std::vector<std::string>      stop_words_str;
     bool                          print_stop_words = false;
@@ -76,11 +78,11 @@ public:
     bool             in_think_mode       = false;
     int              max_thinking_tokens = 0;
     std::vector<int> end_think_token_ids;
-    bool             gen_timeline = false;
-    int              profile_step = 3;
-    bool             ignore_eos   = false;
-    bool             reuse_cache  = true;
-    bool             enable_3fs   = true;
+    bool             gen_timeline              = false;
+    int              profile_step              = 3;
+    bool             ignore_eos                = false;
+    bool             reuse_cache               = true;
+    bool             enable_3fs                = true;
     bool             enable_memory_block_cache = true;
     std::string      trace_id;
 
@@ -104,14 +106,14 @@ public:
     }
 
     void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {
-        for (const auto& vec : special_tokens.stop_words_id_list_) {
+        for (const auto& vec : special_tokens.stop_words_id_list) {
             std::vector<int> tmpVec;
             for (int64_t val : vec) {
                 tmpVec.push_back(static_cast<int>(val));
             }
             stop_words_list.push_back(tmpVec);
         }
-        const auto& vec = special_tokens.stop_words_str_list_;
+        const auto& vec = special_tokens.stop_words_str_list;
         stop_words_str.insert(stop_words_str.begin(), vec.begin(), vec.end());
     }
 
@@ -135,7 +137,8 @@ public:
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
-                     << ", reuse_cache: " << reuse_cache << ", enable_3fs: " << enable_3fs << ", enable_memory_block_cache: " << enable_memory_block_cache << "}";
+                     << ", reuse_cache: " << reuse_cache << ", enable_3fs: " << enable_3fs
+                     << ", enable_memory_block_cache: " << enable_memory_block_cache << "}";
         return debug_string.str();
     }
 
@@ -212,6 +215,7 @@ public:
         JSONIZE(reuse_cache);
         JSONIZE(enable_3fs);
         JSONIZE(enable_memory_block_cache);
+        JSONIZE(aux_info);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

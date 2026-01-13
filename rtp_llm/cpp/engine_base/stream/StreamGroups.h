@@ -17,6 +17,9 @@ public:
         for (auto& stream : streams) {
             auto cur_batch_size  = stream->currentBatchSize();
             auto next_batch_size = stream->nextBatchSize();
+            if (stream->isFakeStream()) {
+                is_fake_stream_ = true;
+            }
             if (stream->isContextStream()) {
                 context_streams_.push_back(stream);
                 total_context_batch_size_ += cur_batch_size;
@@ -38,12 +41,14 @@ public:
             model_execute_token_size_ += stream->currentExecuteTokenSize();
             total_sampler_batch_size_in_ += stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
             total_sampler_batch_size_out_ += next_batch_size;
-            max_block_size_ = std::max(max_block_size_, stream->maxBlockSize());
+            max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
             max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
             gen_timeline_ |= stream->genTimeline();
         }
+        RTP_LLM_CHECK_WITH_INFO(
+            !(streams.size() > 1 && is_fake_stream_), "streams.size()[%d] > 1 && is_fake_stream_", streams.size());
     }
 
     size_t totalDecodeBatchSize() const {
@@ -64,8 +69,8 @@ public:
     size_t totalBlockUpdateCopyNum() const {
         return total_block_update_copy_num_;
     }
-    size_t maxBlockSize() const {
-        return max_block_size_;
+    size_t curBlocksNum() const {
+        return max_blocks_num_;
     }
     size_t modelExecuteTokenSize() const {
         return model_execute_token_size_;
@@ -147,6 +152,14 @@ public:
         return gen_timeline_;
     }
 
+    bool isFakeStream() const {
+        return is_fake_stream_;
+    }
+
+    void setFakeStream(bool is_fake_stream) {
+        is_fake_stream_ = is_fake_stream;
+    }
+
     std::string debugString() const {
         std::stringstream debug_string, context_stream_ids, decode_stream_ids;
         for (auto& stream : context_streams_) {
@@ -164,10 +177,22 @@ public:
                      << ", total_sampler_batch_size_in: " << total_sampler_batch_size_in_
                      << ", total_sampler_batch_size_out: " << total_sampler_batch_size_out_
                      << ", total_block_update_copy_num: " << total_block_update_copy_num_
-                     << ", max_block_size: " << max_block_size_
+                     << ", max_blocks_num_: " << max_blocks_num_
                      << ", model_execute_token_size: " << model_execute_token_size_ << ", max_seq_len: " << max_seq_len_
-                     << "}";
+                     << ", is_fake_stream: " << is_fake_stream_ << "}";
         return debug_string.str();
+    }
+
+    void updateStreams(const std::vector<StreamSpecUpdateInfo>& spec_update_infos) const {
+        int stream_idx = 0;
+        for (auto& stream : decode_streams_) {
+            stream->specUpdate(spec_update_infos[stream_idx]);
+            stream_idx++;
+        }
+        for (auto& stream : context_streams_) {
+            stream->specUpdate(spec_update_infos[stream_idx]);
+            stream_idx++;
+        }
     }
 
 private:
@@ -178,7 +203,7 @@ private:
     size_t                       total_decode_batch_size_      = 0;
     size_t                       total_context_batch_size_     = 0;
     size_t                       total_block_update_copy_num_  = 0;
-    size_t                       max_block_size_               = 0;
+    size_t                       max_blocks_num_               = 0;
     size_t                       model_execute_token_size_     = 0;
     size_t                       max_seq_len_                  = 0;
     size_t                       max_context_seq_len_          = 0;
@@ -188,6 +213,7 @@ private:
     size_t                       total_score_batch_size_       = 0;
     bool                         has_multimodal_input_         = false;
     bool                         gen_timeline_                 = false;
+    bool                         is_fake_stream_               = false;
     std::list<std::string>       adapter_names;
 };
 

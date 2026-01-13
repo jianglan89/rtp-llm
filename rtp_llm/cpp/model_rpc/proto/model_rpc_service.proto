@@ -19,11 +19,11 @@ message TensorPB {
 }
 
 message IntVector {
-  repeated int32 values = 1;
+    repeated int32 values = 1;
 }
 
 message IntMatrix {
-  repeated IntVector rows = 1;
+    repeated IntVector rows = 1;
 }
 
 message RoleAddrPB {
@@ -142,8 +142,6 @@ message AuxInfoPB {
     int32 total_reuse_len = 4;
     int32 prefix_len = 5;
     int32 output_len = 6;
-    int32 fallback_tokens = 7;
-    int32 fallback_times = 8;
     TensorPB cum_log_probs = 9;
     int32 step_output_len = 10;
     bool pd_sep = 11;
@@ -162,9 +160,9 @@ message AuxInfoPB {
     string aux_string = 23;
 }
 
-message GenerateOutputPB {
-    bool finished = 1;
-    AuxInfoPB aux_info = 2;
+message FlattenOutputPB {
+    repeated bool finished = 1;
+    repeated AuxInfoPB aux_info = 2;
     TensorPB output_ids = 3;
     TensorPB hidden_states = 4;
     TensorPB loss = 5;
@@ -175,7 +173,7 @@ message GenerateOutputPB {
 
 message GenerateOutputsPB {
     int64 request_id = 1;
-    repeated GenerateOutputPB generate_outputs = 2;
+    FlattenOutputPB flatten_output = 2;
     int64 receive_load_time = 3;
     int64 start_load_time = 4;
     int64 receive_generate_time = 5;
@@ -228,6 +226,8 @@ message GenerateRequestPB {
     repeated string peer_addrs = 7;
     repeated int32 propose_token_ids = 8;
     repeated int32 position_ids = 9;
+    TensorPB propose_probs = 10;
+    TensorPB propose_hidden = 11;
 }
 
 // in tp case, decode master broadcast to decode worker
@@ -300,88 +300,130 @@ message RemoteStoreResponsePB {
     int64 done_time_us = 2;
 }
 
-enum DistKvCacheOp {
-    UNKNOWN = 0;
-    GET = 1;
-    PUT = 2;
-}
-
-message DistKvCacheRequestPB {
-    message MetaKV {
-        string key = 1;
-        string value = 2;
-    }
-    int64 request_id = 1;
-    repeated int64 cache_keys = 2;
-    repeated int32 block_ids = 3;
-    uint32 ignore_block_num = 4;
-    DistKvCacheOp op = 5;
-    repeated MetaKV extra_metas = 6;
-}
-
-message DistKvCacheResponsePB {
-}
-
 message StatusVersionPB {
-  int64 latest_cache_version = 1;
-  int64 latest_finished_version = 2;
+    int64 latest_cache_version = 1;
+    int64 latest_finished_version = 2;
 }
 
 message CacheVersionPB {
-  int64 latest_cache_version = 1;
-  bool need_cache_keys = 2;
+    int64 latest_cache_version = 1;
+    bool need_cache_keys = 2;
 }
 
 message CacheStatusPB {
-  int64 available_kv_cache = 1;
-  int64 total_kv_cache = 2;
-  int64 block_size = 3;
-  int64 version = 4;
-  map<int64, bool> cache_keys = 5;
+    int64 available_kv_cache = 1;
+    int64 total_kv_cache = 2;
+    int64 block_size = 3;
+    int64 version = 4;
+    map<int64, bool> cache_keys = 5;
+}
+
+message UpdateSchedulerInfoRequestPB {
+    string scheduler_info = 1;
+}
+
+message SetLogLevelRequestPB {
+    string log_level = 1;
+}
+
+message CheckHealthResponsePB {
+    string health = 1;
+}
+
+message UpdateEplbConfigRequestPB {
+    string mode = 1;
+    int32 update_time = 2;
 }
 
 message TaskInfoPB {
-  int64 request_id = 1;
-  int64 inter_request_id = 2;
-  int64 prefix_length = 3;
-  int64 input_length = 4;
-  int64 waiting_time_ms = 5;
-  int64 iterate_count = 6;
-  int64 end_time_ms = 7;
-  int64 dp_rank = 8;
-  bool is_waiting = 9;
+    int64 request_id = 1;
+    int64 inter_request_id = 2;
+    int64 prefix_length = 3;
+    int64 input_length = 4;
+    int64 waiting_time_ms = 5;
+    int64 iterate_count = 6;
+    int64 end_time_ms = 7;
+    int64 dp_rank = 8;
+    bool is_waiting = 9;
+}
+
+message UpdateWeightsRequestPB {
+    string name = 1;
+    string desc = 2;
+    string method = 3;
 }
 
 message WorkerStatusPB {
-  string role = 1;
-  int32 available_concurrency = 2;
-  repeated TaskInfoPB running_task_info = 3;
-  repeated TaskInfoPB finished_task_list = 4;
-  int32 waiting_query_len = 5;
-  int32 running_query_len = 6;
-  double step_latency_ms = 7;
-  int32 iterate_count = 8;
-  int32 dp_size = 9;
-  int32 tp_size = 10;
-  int64 status_version = 12;
-  bool alive = 13;
-  string precision = 14;
+    string role = 1;
+    int32 available_concurrency = 2;
+    repeated TaskInfoPB running_task_info = 3;
+    repeated TaskInfoPB finished_task_list = 4;
+    int32 waiting_query_len = 5;
+    int32 running_query_len = 6;
+    double step_latency_ms = 7;
+    int32 iterate_count = 8;
+    int32 dp_size = 9;
+    int32 tp_size = 10;
+    int64 status_version = 12;
+    bool alive = 13;
+    string precision = 14;
 }
 
-enum MemoryBlockCacheOp {
-    MEMORY_CACHE_COPY_FROM_GPU = 0;
-    MEMORY_CACHE_COPY_TO_GPU = 1;
-}
-
-message MemoryBlockCacheRequestPB {
-    repeated int32 gpu_block_ids = 1;
-    repeated int32 memory_block_ids = 2;
-    MemoryBlockCacheOp op = 3;
+message EmbeddingInputPB {
+    repeated int32 token_ids = 1;
+    repeated int32 token_type_ids = 2;
+    repeated int32 input_lengths = 3;
     int64 request_id = 4;
+    repeated MultimodalInputPB multimodal_features = 5;
 }
 
-message MemoryBlockCacheResponsePB {
+message EmbeddingHealthRequestPB {
+    int64 request_id = 1;
+}
+
+message EmbeddingTensorMapPB {
+    map<string, TensorPB> tensor_map = 1;
+}
+
+message EmbeddingOutputPB {
+    bool output_is_tensor = 1;
+    TensorPB output_t = 2;
+    repeated EmbeddingTensorMapPB output_map = 3;
+}
+
+service EmbeddingRpcService {
+    rpc embedding(EmbeddingInputPB) returns (EmbeddingOutputPB);
+    rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
+}
+
+message MemoryBroadcastTpRequestPB {
+    message Group {
+        int32 group_id = 1;
+        repeated int32 gpu_block_ids = 2;
+        repeated int32 memory_block_ids = 3;
+    }
+    enum Direction {
+        H2D = 0;
+        D2H = 1;
+    }
+    repeated Group groups = 1;
+    Direction direction = 2;
+}
+
+message MemoryBroadcastTpResponsePB {
     bool success = 1;
+}
+
+message BroadcastTpRequestPB {
+    oneof request {
+        MemoryBroadcastTpRequestPB mem_request = 1;
+    }
+}
+
+message BroadcastTpResponsePB {
+    oneof response {
+        MemoryBroadcastTpResponsePB mem_response = 1;
+    }
 }
 
 service RpcService {
@@ -393,12 +435,18 @@ service RpcService {
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
     rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
 
+    rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
+    rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
+    rpc SetPause(EmptyPB) returns (EmptyPB);
+    rpc SetRestart(EmptyPB) returns (EmptyPB);
+    rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
+    rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
+    rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
-    rpc DistKvCache(DistKvCacheRequestPB) returns (DistKvCacheResponsePB);
-    rpc MemoryBlockCache(MemoryBlockCacheRequestPB) returns (MemoryBlockCacheResponsePB);
+    rpc BroadcastTp(BroadcastTpRequestPB) returns (BroadcastTpResponsePB);
 }
 
 service MultimodalRpcService {

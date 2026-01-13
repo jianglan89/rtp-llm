@@ -55,7 +55,7 @@ cc_library(
         "//rtp_llm/cpp/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/cuda:launch_utils",
     ],
-    copts = any_cuda_copts(), 
+    copts = any_cuda_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
@@ -102,9 +102,11 @@ cc_library(
     name = "cuda_quantization",
     srcs = [
         "per_token_group_quant_8bit.cu",
+        "per_token_group_quant_8bit_v2.cu",
     ],
     hdrs = [
         "per_token_group_quant_8bit.h",
+        "per_token_group_quant_8bit_v2.h",
     ],
     deps = [
         "//rtp_llm/cpp/cuda:cuda_host_utils",
@@ -211,8 +213,11 @@ cc_library(
     name = "rocm_fused_qk_rmsnorm",
     srcs = [
         "rocm/fused_qk_rmsnorm.cu",
+        "rocm/masked_silu_and_mul/mask_kernel.cu",
     ],
     hdrs = [
+        "rocm/masked_silu_and_mul/mask_kernel.h",
+        "rocm/masked_silu_and_mul/utils/array_utils.h",
         "rocm/fused_qk_rmsnorm.h",
     ],
     deps = rocm_deps + [
@@ -250,6 +255,7 @@ cc_library(
     deps = [
         ":rocm_basic",
         ":rocm_mla",
+        "//rtp_llm/cpp/kernels/rocm/sampling:sampling",
     ],
     visibility = ["//visibility:public"],
 )
@@ -305,18 +311,12 @@ cc_library(
 cc_library(
     name = "kernels_sampling",
     srcs = [
-        "sampling_topk_kernels.cu",
-        "sampling_topp_kernels.cu",
         "sampling_penalty_kernels.cu",
-        "ban_bad_words.cu",
         "banRepeatNgram.cu",
         "mask_logits.cu",
     ],
     hdrs = [
-        "sampling_topk_kernels.h",
-        "sampling_topp_kernels.h",
         "sampling_penalty_kernels.h",
-        "ban_bad_words.h",
         "banRepeatNgram.h",
         "mask_logits.h",
         "penalty_types.h",
@@ -359,6 +359,7 @@ cc_library(
     ],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:math_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/cuda:launch_utils",
@@ -448,10 +449,12 @@ cc_library(
     srcs = [
         "batch_copy.cu",
         "copy_utils.cu",
+        "cuda_graph_copy_kernel.cu",
     ],
     hdrs = [
         "batch_copy.h",
         "copy_utils.h",
+        "cuda_graph_copy_kernel.h",
     ],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
@@ -559,6 +562,7 @@ cc_library(
     ]),
     hdrs = glob([
         "mla_kernels/*.h",
+        "mla_kernels/*.cuh",
     ]),
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",

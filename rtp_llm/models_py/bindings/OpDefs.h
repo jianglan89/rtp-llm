@@ -1,13 +1,14 @@
 #pragma once
 
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
-struct MlaParams {
+struct MlaParams: public rtp_llm::ParamsBase {
     torch::Tensor batch_indice;
     torch::Tensor positions;
     torch::Tensor paged_kv_last_page_len;
@@ -18,21 +19,23 @@ struct MlaParams {
     torch::Tensor prefill_page_indptr;
     torch::Tensor qo_indptr;
     torch::Tensor batch_reuse_info_vec;
+
+    // Hidden field to keep FlashInferMlaAttnParams object alive
+    // This ensures the underlying buffers (buf_d, buf_h) are not deallocated
+    std::shared_ptr<void> _params_holder;
 };
 
 struct KVCache {
-    torch::Tensor k_cache_base;
-    torch::Tensor v_cache_base;
-    torch::Tensor k_scale_base;
-    torch::Tensor v_scale_base;
+    torch::Tensor kv_cache_base;
+    torch::Tensor kv_scale_base;
+    int           seq_size_per_block;
     int           layer_id = -1;
     KVCache       getLayerCache(int idx) {
         KVCache layer_cache;
-        layer_cache.k_cache_base = k_cache_base[idx];
-        layer_cache.v_cache_base = v_cache_base[idx];
-        if (k_scale_base.defined() && k_scale_base.numel() > 0) {
-            layer_cache.k_scale_base = k_scale_base[idx];
-            layer_cache.v_scale_base = v_scale_base[idx];
+        layer_cache.kv_cache_base      = kv_cache_base[idx];
+        layer_cache.seq_size_per_block = seq_size_per_block;
+        if (kv_scale_base.defined() && kv_scale_base.numel() > 0) {
+            layer_cache.kv_scale_base = kv_scale_base[idx];
         }
         layer_cache.layer_id = idx;
         return layer_cache;
@@ -50,9 +53,8 @@ struct PyCacheStoreInputs {
     torch::Tensor            request_pd_separation;
     std::vector<std::string> cache_keys;  // [context_batch_size]
     size_t                   tokens_per_block;
-    size_t                   k_block_size;
-    size_t                   v_block_size;
-    size_t                   scale_block_size;
+    size_t                   kv_block_stride_bytes;
+    size_t                   kv_scale_stride_bytes;
     bool                     pd_separation   = false;
     size_t                   model_id        = 0;
     bool                     decode_entrance = false;
@@ -65,21 +67,41 @@ struct PyCaptureMetaData {
     int capture_batch_size{1};
 };
 
+struct PyPrefillCudaGaphCopyParams {
+    // for embedding model cuda graph capture, the attenton batch size is padded to max_batch_size,
+    // so we can't get the real batch size for `copy kernel` using `input_lengths.size(0)`(which is max_batch_size).
+    torch::Tensor cuda_graph_prefill_batch_size = torch::empty(0);
+    int           max_seq_len                   = 0;
+    int           max_batch_size                = 0;
+};
+
 struct PyAttentionInputs {
-    bool             is_prefill;
+    bool             is_prefill{false};
     torch::Tensor    prefix_lengths;
     torch::Tensor    sequence_lengths;
     torch::Tensor    input_lengths;
     torch::Tensor    kv_cache_block_id_host;
     torch::Tensor    kv_cache_block_id_device;
     caffe2::TypeMeta dtype;
-    int              kv_block_offset = 0;
     // for `FusedRopeKVCacheDecodeOp`.
     torch::Tensor cu_seqlens;
+    torch::Tensor cu_kv_seqlens;
+    torch::Tensor decode_cu_seqlens_host;
+
+    int           context_total_kv_length;
+    int           total_tokens = 0;
     torch::Tensor padding_offset;
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
+
+    std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
+    bool                                       is_s_padded = false;
+    // deivce tensor
+    torch::Tensor prefix_lengths_d;
+    torch::Tensor sequence_lengths_plus_1_d;
+    torch::Tensor input_lengths_d;
+    torch::Tensor decode_cu_seqlens_d;
 };
 
 struct BertEmbeddingInputs {
@@ -92,6 +114,7 @@ struct BertEmbeddingInputs {
 
 struct PyModelInputs {
     torch::Tensor       input_ids;
+    torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
 };

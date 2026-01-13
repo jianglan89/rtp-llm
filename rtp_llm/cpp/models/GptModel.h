@@ -6,8 +6,8 @@
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
-#include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include <string>
 #include <utility>
 
@@ -29,11 +29,11 @@ struct GptModelDescription {
 };
 
 struct GptModelInitParams {
-    rtp_llm::DeviceBase*                                 device;
-    const rtp_llm::Weights                               weights;
-    const GptModelDescription                            description;
-    const std::optional<KVCacheAllocator::KVCacheBuffer> kv_cache_buffer;
-    size_t                                               model_id;
+    rtp_llm::DeviceBase*               device;
+    const rtp_llm::Weights             weights;
+    const GptModelDescription          description;
+    const std::optional<KVCacheBuffer> kv_cache_buffer;
+    size_t                             model_id;
 };
 
 struct EmbeddingPostOutput {
@@ -62,6 +62,8 @@ enum GptModelInputIndex : size_t {
     mtpHiddenStates,
     mtpHiddenStatesDtype,
     skipRun,
+    gptModelRequestLength,  // length of request id & pd_separation
+    isFakeStream,
     gptModelInputLength,
 };
 
@@ -148,12 +150,50 @@ struct TokenSliceInfo {
     size_t count  = 0;
 };
 
+struct ModelBufferHolder {
+    std::vector<BufferPtr>     buffers;
+    std::vector<torch::Tensor> tensors;
+
+    void hold_host(const BufferPtr& buffer) {
+        if (buffer && buffer->where() != MemoryType::MEMORY_GPU) {
+            buffers.push_back(buffer);
+        }
+    }
+
+    void hold_host(const torch::Tensor& tensor) {
+        if (tensor.defined() && tensor.device().is_cpu()) {
+            tensors.push_back(tensor);
+        }
+    }
+
+    void hold(const BufferPtr& buffer) {
+        if (buffer) {
+            buffers.push_back(buffer);
+        }
+    }
+
+    void hold(const torch::Tensor& tensor) {
+        if (tensor.defined()) {
+            tensors.push_back(tensor);
+        }
+    }
+
+    void release() {
+        buffers.clear();
+        tensors.clear();
+    }
+};
+
 class GptModel {
 public:
     GptModel(const GptModelInitParams& params);
     virtual ~GptModel() {};
 
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
+
+    void releaseBuffers() {
+        buffer_holder_.release();
+    }
 
 protected:
     rtp_llm::AttentionCommonInputs prepareAttentionInputs(const GptModelInputs& inputs,
@@ -223,17 +263,19 @@ protected:
 
     void cleanExpertStats();
 
+    void holdInputsHostBuffers(const GptModelInputs& inputs);
+
 protected:
     rtp_llm::DeviceBase*            device_;
     const rtp_llm::DeviceProperties device_props_;
     const size_t                    layer_num_;
     const GptModelDescription       description_;
-    rtp_llm::BufferPtr              k_cache_buffer_;
-    rtp_llm::BufferPtr              v_cache_buffer_;
-    rtp_llm::BufferPtr              k_scale_buffer_;
-    rtp_llm::BufferPtr              v_scale_buffer_;
+    rtp_llm::BufferPtr              kv_cache_buffer_;
+    rtp_llm::BufferPtr              kv_scale_buffer_;
     rtp_llm::BufferPtr              residual_scale_fp32_;
     rtp_llm::BufferPtr              residual_scale_;
+
+    ModelBufferHolder buffer_holder_;
 
 public:
     rtp_llm::Weights            weights_;

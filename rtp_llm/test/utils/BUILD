@@ -11,11 +11,26 @@ py_library(
     srcs = ["bench_util.py"],
 )
 
+py_library(
+    name = "numeric_util",
+    deps = [],
+    srcs = ["numeric_util.py"],
+)
+
+py_library(
+    name = "cuda_graph_util",
+    deps = [],
+    srcs = ["cuda_graph_util.py"],
+)
+
 py_binary(
     name = "gpu_lock",
     deps = [":torch"],
     main = "device_resource.py",
-    srcs = ["device_resource.py"],
+    srcs = [
+        "device_resource.py",
+        "jit_sys_path_setup.py",
+    ],
 )
 
 py_library(

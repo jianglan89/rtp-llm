@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
+#include <cstring>
 
 namespace rtp_llm {
 
@@ -82,7 +83,7 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
     }
 
     auto  generate_stream = decode_context.getStream();
-    auto& block_ids       = generate_stream->kvCache().blocks(0);
+    auto& block_ids       = generate_stream->kvCachePtr()->blocks(0);
     for (auto& block_id : block_ids) {
         request.add_block_ids(block_id);
     }
@@ -91,7 +92,7 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
     request.set_reuse_block_size(generate_stream->reuseBlockSize());
 
     request.set_use_mla(engine_->resourceContext().cache_manager->cacheConfig().use_mla);
-    request.set_layer_num(maga_init_params_.gpt_init_parameter.num_layers_);
+    request.set_layer_num(maga_init_params_.model_config_.num_layers);
     request.set_deadline_us(currentTimeUs() + decode_context.request_timeout_ms * 1000);
 }
 
@@ -111,10 +112,10 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
 
     // If no host specified in request, check if there's a master role
     char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
+    char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
     bool  has_master_role =
-        !maga_init_params_.gpt_init_parameter.service_discovery_config.use_local
-        && (decode_cm2_config_env != nullptr
-            || !maga_init_params_.gpt_init_parameter.service_discovery_config.remote_rpc_server_ip.empty());
+        (decode_cm2_config_env != nullptr
+            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
 
     // For PD inversion where request directly reaches decode, we need to select prefill machines
     if (!host && has_master_role) {
@@ -157,7 +158,7 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
                 &got_tag,
                 &ok,
                 std::chrono::system_clock::now()
-                    + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.decode_polling_call_prefill_ms_))
+                    + std::chrono::milliseconds(maga_init_params_.pd_sep_config.decode_polling_call_prefill_ms))
             == grpc::CompletionQueue::NextStatus::TIMEOUT) {
             if (decode_context.server_context->IsCancelled()) {
                 RTP_LLM_LOG_WARNING("request [%s] is cancelled", decode_context.request_key.c_str());
@@ -244,23 +245,22 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     int64_t cost_time_us      = currentTimeUs() - decode_context.request_begin_time_us;
 
     auto response_output = response.mutable_output();
-    for (size_t i = 0; i < response_output->generate_outputs_size(); i++) {
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_first_token_cost_time_us(
-            first_token_rt_us);
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_cost_time_us(cost_time_us);
+    for (size_t i = 0; i < response_output->flatten_output().aux_info_size(); i++) {
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_first_token_cost_time_us(first_token_rt_us);
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_cost_time_us(cost_time_us);
 
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_total_reuse_len(
-            response_output->generate_outputs(i).aux_info().total_reuse_len());
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_local_reuse_len(
-            response_output->generate_outputs(i).aux_info().local_reuse_len());
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_remote_reuse_len(
-            response_output->generate_outputs(i).aux_info().remote_reuse_len());
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_prefill_total_reuse_len(
+            response_output->flatten_output().aux_info(i).total_reuse_len());
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_prefill_local_reuse_len(
+            response_output->flatten_output().aux_info(i).local_reuse_len());
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_prefill_remote_reuse_len(
+            response_output->flatten_output().aux_info(i).remote_reuse_len());
 
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_total_reuse_len(
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(
             decode_total_reuse_len);
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_local_reuse_len(
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_local_reuse_len(
             decode_local_reuse_len);
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_remote_reuse_len(
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
             decode_remote_reuse_len);
     }
 
@@ -285,7 +285,6 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
     if (propose_maga_init_params_) {
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
-        generate_stream->setFallbackPrefixLength(generate_stream->reuseLength());
         generate_stream->setSpEditRun(false);
     }
     generate_stream->resetBeginTime(currentTimeUs());

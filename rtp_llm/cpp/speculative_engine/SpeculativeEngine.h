@@ -110,6 +110,8 @@ private:
 
     absl::Status spStep(std::list<GenerateStreamPtr>& streams);
 
+    void preparePerfStreams(std::list<GenerateStreamPtr>& streams);
+
     std::list<GenerateStreamPtr> extractPrefillStreams(std::list<GenerateStreamPtr>& streams) {
         std::list<GenerateStreamPtr> need_prefill_streams;
         streams.erase(std::remove_if(streams.begin(),
@@ -138,7 +140,9 @@ private:
 
     std::list<GenerateStreamPtr> extractFirstPrefillStreams(std::list<GenerateStreamPtr>& streams);
 
-    bool updateEplbConfig(const EplbConfig& config) override;
+    bool updateEplbConfig(const EPLBConfig& config) override;
+
+    bool checkStopAndSetError(const GenerateStreamPtr& check_stream, const GenerateStreamPtr& target_stream);
 
 private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_ = nullptr;

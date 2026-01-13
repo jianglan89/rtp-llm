@@ -15,7 +15,6 @@ int CudaGraphDecodePaddingOp::getCurrentRealGraphSize() {
 
 CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py_instance) {
     DeviceInitParams params;
-    DeviceBase*      device                              = rtp_llm::DeviceFactory::getDefaultDevice();
     params.hw_kernel_config.enable_cuda_graph            = true;
     params.concurrency_config.concurrency_limit          = 128;
     params.hw_kernel_config.enable_cuda_graph_debug_mode = false;
@@ -24,9 +23,10 @@ CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py
     params.tokens_per_block                              = 64;
     // int  layer_num                              = 24;
     // int  block_num                              = 26037;
-    auto               runner_ptr            = device->getDeviceGraphRunner(params, std::move(py_instance), 663676);
-    CudaGraphRunnerPtr cuda_graph_runner_ptr = dynamic_cast<CudaGraphRunner*>(runner_ptr);
-    cuda_graph_runner_ptr->setModelDataType(torch::scalarTypeToTypeMeta(torch::kBFloat16));
+    c10::ScalarType    dtype             = torch::kFloat16;
+    int                num_tokens_per_bs = 1;  // decode mode
+    CudaGraphRunnerPtr cuda_graph_runner_ptr =
+        new CudaGraphRunner(params, std::move(py_instance), dtype, num_tokens_per_bs, false);
     return cuda_graph_runner_ptr;
 }
 
@@ -50,7 +50,7 @@ PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
         seq_size_per_block,
         max_num_token);
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
-    inputs.input_ids = torch::zeros({max_num_token}, options3);
+    inputs.input_ids = torch::full({max_num_token}, 10, options3);
     RTP_LLM_LOG_INFO("build input_ids shapes: %d\n", inputs.input_ids.sizes());
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
     inputs.attention_inputs.prefix_lengths = torch::empty(0);
@@ -65,14 +65,17 @@ PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
         torch::zeros({int(batch_size), ((max_seq_len + seq_size_per_block - 1) / seq_size_per_block)}, options3);
     inputs.attention_inputs.kv_cache_block_id_host =
         torch::zeros({int(batch_size), ((max_seq_len + seq_size_per_block - 1) / seq_size_per_block)}, options2);
-    inputs.attention_inputs.padding_offset  = torch::zeros({max_seq_len}, options3);
-    inputs.attention_inputs.is_prefill      = false;
-    inputs.attention_inputs.dtype           = torch::kBFloat16;
-    inputs.attention_inputs.kv_block_offset = 663676;
+    inputs.attention_inputs.padding_offset = torch::zeros({max_seq_len}, options3);
+    inputs.attention_inputs.is_prefill     = false;
+    inputs.attention_inputs.dtype          = torch::kFloat16;
     // max_bs = 8
-    size_t    cu_len = batch_size + 1;
-    BufferPtr cu_seqlens_buf =
-        cuda_graph_runner_->device_->allocateBuffer({DataType::TYPE_INT32, {cu_len}, AllocationType::HOST});
+    size_t cu_len = batch_size + 1;
+
+    // 使用 torch 创建 cu_seqlens tensor
+    torch::Tensor cu_seqlens_tensor = torch::zeros({int(cu_len)}, options2).pin_memory();
+
+    // 将 torch tensor 转换为 BufferPtr
+    BufferPtr cu_seqlens_buf           = torchTensor2Buffer(cu_seqlens_tensor);
     inputs.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
     return inputs;
 }
