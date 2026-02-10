@@ -272,14 +272,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_block_size_per_item", &KVCacheConfig::max_block_size_per_item)
         .def_readwrite("threefs_read_iov_size", &KVCacheConfig::threefs_read_iov_size)
         .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size)
-        .def_readwrite("memory_block_cache_size_mb", &KVCacheConfig::memory_block_cache_size_mb)
-        .def_readwrite("memory_block_cache_sync_timeout_ms", &KVCacheConfig::memory_block_cache_sync_timeout_ms)
+        .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
+        .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
+        .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
+        .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
+        .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
         .def("to_string", &KVCacheConfig::to_string)
         .def(py::pickle(
@@ -298,42 +301,48 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.max_block_size_per_item,
                                       self.threefs_read_iov_size,
                                       self.threefs_write_iov_size,
-                                      self.memory_block_cache_size_mb,
-                                      self.memory_block_cache_sync_timeout_ms,
+                                      self.memory_cache_size_mb,
+                                      self.memory_cache_sync_timeout_ms,
                                       self.int8_kv_cache,
                                       self.fp8_kv_cache,
                                       self.kv_cache_mem_mb,
                                       self.seq_size_per_block,
                                       self.test_block_num,
-                                      self.use_block_cache);
+                                      self.use_block_cache,
+                                      self.enable_device_cache,
+                                      self.enable_memory_cache,
+                                      self.write_cache_sync);
             },
             [](py::tuple t) {
-                if (t.size() != 22)
+                if (t.size() != 25)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
-                    c.reuse_cache                        = t[0].cast<bool>();
-                    c.multi_task_prompt                  = t[1].cast<std::string>();
-                    c.multi_task_prompt_str              = t[2].cast<std::string>();
-                    c.multi_task_prompt_tokens           = t[3].cast<std::map<std::string, std::vector<int>>>();
-                    c.reserve_block_ratio                = t[4].cast<int64_t>();
-                    c.enable_3fs                         = t[5].cast<bool>();
-                    c.match_timeout_ms                   = t[6].cast<int>();
-                    c.rpc_get_cache_timeout_ms           = t[7].cast<int>();
-                    c.rpc_put_cache_timeout_ms           = t[8].cast<int>();
-                    c.threefs_read_timeout_ms            = t[9].cast<int>();
-                    c.threefs_write_timeout_ms           = t[10].cast<int>();
-                    c.max_block_size_per_item            = t[11].cast<int>();
-                    c.threefs_read_iov_size              = t[12].cast<int64_t>();
-                    c.threefs_write_iov_size             = t[13].cast<int64_t>();
-                    c.memory_block_cache_size_mb         = t[14].cast<int64_t>();
-                    c.memory_block_cache_sync_timeout_ms = t[15].cast<int64_t>();
-                    c.int8_kv_cache                      = t[16].cast<int>();
-                    c.fp8_kv_cache                       = t[17].cast<int>();
-                    c.kv_cache_mem_mb                    = t[18].cast<int64_t>();
-                    c.seq_size_per_block                 = t[19].cast<int>();
-                    c.test_block_num                     = t[20].cast<int>();
-                    c.use_block_cache                    = t[21].cast<int>();
+                    c.reuse_cache                  = t[0].cast<bool>();
+                    c.multi_task_prompt            = t[1].cast<std::string>();
+                    c.multi_task_prompt_str        = t[2].cast<std::string>();
+                    c.multi_task_prompt_tokens     = t[3].cast<std::map<std::string, std::vector<int>>>();
+                    c.reserve_block_ratio          = t[4].cast<int64_t>();
+                    c.enable_3fs                   = t[5].cast<bool>();
+                    c.match_timeout_ms             = t[6].cast<int>();
+                    c.rpc_get_cache_timeout_ms     = t[7].cast<int>();
+                    c.rpc_put_cache_timeout_ms     = t[8].cast<int>();
+                    c.threefs_read_timeout_ms      = t[9].cast<int>();
+                    c.threefs_write_timeout_ms     = t[10].cast<int>();
+                    c.max_block_size_per_item      = t[11].cast<int>();
+                    c.threefs_read_iov_size        = t[12].cast<int64_t>();
+                    c.threefs_write_iov_size       = t[13].cast<int64_t>();
+                    c.memory_cache_size_mb         = t[14].cast<int64_t>();
+                    c.memory_cache_sync_timeout_ms = t[15].cast<int64_t>();
+                    c.int8_kv_cache                = t[16].cast<int>();
+                    c.fp8_kv_cache                 = t[17].cast<int>();
+                    c.kv_cache_mem_mb              = t[18].cast<int64_t>();
+                    c.seq_size_per_block           = t[19].cast<int>();
+                    c.test_block_num               = t[20].cast<int>();
+                    c.use_block_cache              = t[21].cast<int>();
+                    c.enable_device_cache          = t[22].cast<bool>();
+                    c.enable_memory_cache          = t[23].cast<bool>();
+                    c.write_cache_sync             = t[24].cast<bool>();
 
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
@@ -474,7 +483,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("m_split", &DeviceResourceConfig::m_split)
         .def_readwrite("enable_comm_overlap", &DeviceResourceConfig::enable_comm_overlap)
         .def_readwrite("enable_layer_micro_batch", &DeviceResourceConfig::enable_layer_micro_batch)
-        .def_readwrite("not_use_default_stream", &DeviceResourceConfig::not_use_default_stream)
         .def("to_string", &DeviceResourceConfig::to_string)
         .def(py::pickle(
             [](const DeviceResourceConfig& self) {
@@ -484,11 +492,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.overlap_comm_type,
                                       self.m_split,
                                       self.enable_comm_overlap,
-                                      self.enable_layer_micro_batch,
-                                      self.not_use_default_stream);
+                                      self.enable_layer_micro_batch);
             },
             [](py::tuple t) {
-                if (t.size() != 8)
+                if (t.size() != 7)
                     throw std::runtime_error("Invalid state!");
                 DeviceResourceConfig c;
                 try {
@@ -499,7 +506,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.m_split                     = t[4].cast<int>();
                     c.enable_comm_overlap         = t[5].cast<bool>();
                     c.enable_layer_micro_batch    = t[6].cast<int>();
-                    c.not_use_default_stream      = t[7].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("DeviceResourceConfig unpickle error: ") + e.what());
                 }
@@ -518,6 +524,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("deep_ep_num_sm", &MoeConfig::deep_ep_num_sm)
         .def_readwrite("max_moe_normal_masked_token_num", &MoeConfig::max_moe_normal_masked_token_num)
         .def_readwrite("use_all_gather", &MoeConfig::use_all_gather)
+        .def_readwrite("ll_num_max_token", &MoeConfig::ll_num_max_token)
         .def("to_string", &MoeConfig::to_string)
         .def(py::pickle(
             [](const MoeConfig& self) {
@@ -529,10 +536,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.hack_moe_expert,
                                       self.deep_ep_num_sm,
                                       self.max_moe_normal_masked_token_num,
-                                      self.use_all_gather);
+                                      self.use_all_gather,
+                                      self.ll_num_max_token);
             },
             [](py::tuple t) {
-                if (t.size() != 9)
+                if (t.size() != 10)
                     throw std::runtime_error("Invalid state!");
                 MoeConfig c;
                 try {
@@ -545,6 +553,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.deep_ep_num_sm                  = t[6].cast<int>();
                     c.max_moe_normal_masked_token_num = t[7].cast<int>();
                     c.use_all_gather                  = t[8].cast<bool>();
+                    c.ll_num_max_token                = t[9].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }
@@ -1143,7 +1152,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("v_head_dim", &AttentionConfigs::v_head_dim)
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
-        .def_readwrite("skip_append_kv_cache", &AttentionConfigs::skip_append_kv_cache)
+        .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
         .def_readwrite("dtype", &AttentionConfigs::dtype);
 
     py::class_<EPLBConfig>(m, "EPLBConfig")

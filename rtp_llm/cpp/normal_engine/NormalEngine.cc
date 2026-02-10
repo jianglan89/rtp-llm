@@ -222,6 +222,15 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     stream->setIsFakeStream(true);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
+    if (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE) {
+        BufferPtr new_tokens =
+            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, 1}, rtp_llm::AllocationType::HOST});
+        *new_tokens->dataWithOffset<int32_t>(0) = 0;
+
+        StreamUpdateInfo update_info{
+            new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false};
+        stream->update(update_info);
+    }
     return stream;
 }
 
@@ -257,9 +266,11 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
-    resource_context_.reuse_cache               = kv_cache_config.reuse_cache;
-    resource_context_.enable_3fs                = kv_cache_config.enable_3fs;
-    resource_context_.enable_memory_block_cache = kv_cache_config.memory_block_cache_size_mb > 0;
+    resource_context_.reuse_cache         = kv_cache_config.reuse_cache;
+    resource_context_.enable_3fs          = kv_cache_config.enable_3fs;
+    resource_context_.enable_device_cache = kv_cache_config.enable_device_cache;
+    resource_context_.enable_memory_cache = kv_cache_config.enable_memory_cache;
+    resource_context_.write_cache_sync    = kv_cache_config.write_cache_sync;
 
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {
         resource_context_.reuse_cache = true;

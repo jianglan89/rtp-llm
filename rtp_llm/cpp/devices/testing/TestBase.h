@@ -106,6 +106,7 @@ public:
         rtp_llm::ConcurrencyConfig           concurrency_config;
         rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
         rtp_llm::RuntimeConfig               runtime_config;
+        rtp_llm::ModelSpecificConfig         model_specific_config;
 
         rtp_llm::DeviceFactory::initDevices(parallelism_config,
                                             model_config,
@@ -119,7 +120,8 @@ public:
                                             hw_kernel_config,
                                             concurrency_config,
                                             ffn_disaggregate_config,
-                                            runtime_config);
+                                            runtime_config,
+                                            model_specific_config);
         device_ = rtp_llm::DeviceFactory::getDefaultDevice();
     }
 
@@ -167,7 +169,8 @@ protected:
                                     const std::vector<T>&      data,
                                     rtp_llm::AllocationType    alloc_type = rtp_llm::AllocationType::DEVICE) {
         const auto num_elements = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
-        RTP_LLM_CHECK(num_elements == data.size());
+        RTP_LLM_CHECK_WITH_INFO(
+            num_elements == data.size(), "num_elements %ld != data.size %ld", num_elements, data.size());
         if (alloc_type == rtp_llm::AllocationType::DEVICE) {
             return createDeviceBuffer<T>(shape, data.data());
         } else {
@@ -318,7 +321,7 @@ protected:
 
         auto batch_kv_cache = std::make_shared<rtp_llm::BatchKVCacheResource>();
         batch_kv_cache->resetBatchSize(batch_size);
-        batch_kv_cache->initGroups(1);
+        batch_kv_cache->initGroups(1, cache_config.layer_all_num);
 
         auto complete_token_ids =
             std::make_shared<rtp_llm::CompleteTokenIds>(device_,
@@ -492,8 +495,8 @@ protected:
     double                                   rtol_   = 1e-03;
     double                                   atol_   = 1e-03;
     std::shared_ptr<rtp_llm::KVCacheManager> cache_manager_;
-    size_t                                   device_reserve_memory_size_ = 1024L * 1024 * 1024;      // 1MB;
-    size_t                                   host_reserve_memory_size_   = 1L * 1024 * 1024 * 1024;  // 1GB;
+    size_t                                   device_reserve_memory_size_ = 20 * 1024L * 1024 * 1024;  // 1GB;
+    size_t                                   host_reserve_memory_size_   = 1L * 1024 * 1024 * 1024;   // 1GB;
     int64_t                                  max_seq_len_                = 8192;
 };
 

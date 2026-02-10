@@ -7,7 +7,7 @@ import torch
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.worker_info import g_parallel_info, update_worker_info
 from rtp_llm.model_factory_register import ModelDict
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import RoleType, SpeculativeType
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 
@@ -16,6 +16,7 @@ def auto_configure_deepep(
     deep_ep_config,
     g_parallel_info,
     role_type: RoleType,
+    ll_num_max_token: int = 0,
 ):
     """
     Automatically configure DeepEP settings based on deployment scenario.
@@ -47,12 +48,12 @@ def auto_configure_deepep(
 
     tp_size = g_parallel_info.tp_size
     ep_size = g_parallel_info.ep_size
-
+    moe_config.ll_num_max_token = ll_num_max_token
     moe_config.use_all_gather = (
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
-        and ep_size == tp_size)
-
+        and ep_size == tp_size
+    )
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
         moe_config.use_deepep_low_latency = False
@@ -74,7 +75,6 @@ def auto_configure_deepep(
             moe_config=moe_config,
             world_size=g_parallel_info.world_size,
             local_world_size=g_parallel_info.local_world_size,
-            tp_size=g_parallel_info.tp_size,
             role_type=role_type,
         )
     else:
@@ -90,6 +90,7 @@ def auto_configure_deepep(
             f"  USE_DEEPEP_MOE: {moe_config.use_deepep_moe}\n"
             f"  USE_DEEPEP_INTERNODE: {moe_config.use_deepep_internode}\n"
             f"  USE_DEEPEP_LOW_LATENCY: {moe_config.use_deepep_low_latency}"
+            f"  ll_num_max_token: {moe_config.ll_num_max_token}"
         )
 
 
@@ -97,7 +98,6 @@ def _apply_auto_deepep_config(
     moe_config,
     world_size: int,
     local_world_size: int,
-    tp_size: int,
     role_type: RoleType,
 ):
     """
@@ -111,8 +111,8 @@ def _apply_auto_deepep_config(
     is_decode = role_type == RoleType.DECODE
 
     # Determine GPU configuration
-    is_single_gpu = tp_size == 1
-    is_multi_gpu = tp_size > 1
+    is_single_gpu = world_size == 1
+    is_multi_gpu = world_size > 1
     is_multi_node = world_size > local_world_size
 
     # Apply configuration rules
@@ -164,7 +164,6 @@ def _apply_auto_deepep_config(
     logging.info(
         f"Auto-configured DeepEP settings based on deployment scenario:\n"
         f"  Role Type: {role_type}\n"
-        f"  TP Size: {tp_size}\n"
         f"  World Size: {world_size}\n"
         f"  Local World Size: {local_world_size}\n"
         f"  PD Separation: {is_pd_separation}\n"
@@ -191,9 +190,6 @@ def setup_default_args(py_env_configs):
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
-
-    if py_env_configs.py_hw_kernel_config.enable_cuda_graph:
-        py_env_configs.device_resource_config.not_use_default_stream = True
 
     # add rocm env config, if using default value, change it to optimize version
     # 这些特殊处理仍然需要设置环境变量（因为可能被 C++ 代码读取）
@@ -300,10 +296,14 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         py_env_configs.server_config.worker_info_port_num,
         py_env_configs.distribute_config.remote_server_port,
     )
-
+    ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit
+    sp_type = py_env_configs.sp_config.type  # Get SpeculativeType enum value
+    if py_env_configs.sp_config.type != SpeculativeType.NONE:
+        ll_num_max_token *= py_env_configs.sp_config.gen_num_per_cycle + 1
     auto_configure_deepep(
         moe_config=py_env_configs.moe_config,
         deep_ep_config=py_env_configs.deep_ep_config,
         g_parallel_info=g_parallel_info,
         role_type=py_env_configs.role_config.role_type,
+        ll_num_max_token=ll_num_max_token,
     )

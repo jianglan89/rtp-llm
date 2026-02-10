@@ -22,6 +22,11 @@ void registerPyOpDefs(pybind11::module& m) {
         [](const torch::Tensor& tensor) { return torch::scalarTypeToTypeMeta(tensor.scalar_type()); },
         "Convert tensor dtype to TypeMeta");
 
+    m.def(
+        "get_scalar_type",
+        [](caffe2::TypeMeta dtype) { return dtype.toScalarType(); },
+        "Convert TypeMeta to scalar type");
+
     pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
     pybind11::class_<PyCaptureMetaData>(m, "PyCaptureMetaData").def(pybind11::init<>());
 
@@ -45,19 +50,6 @@ void registerPyOpDefs(pybind11::module& m) {
             pybind11::arg("seq_size_per_block"),
             "Fill parameters for CUDA graph execution");
 
-    pybind11::class_<MlaParams, std::shared_ptr<MlaParams>, rtp_llm::ParamsBase>(m, "MlaParams")
-        .def(pybind11::init<>())
-        .def_readonly("batch_indice", &MlaParams::batch_indice)
-        .def_readonly("positions", &MlaParams::positions)
-        .def_readonly("paged_kv_last_page_len", &MlaParams::paged_kv_last_page_len)
-        .def_readonly("kvlen", &MlaParams::kvlen)
-        .def_readonly("page_indice", &MlaParams::page_indice)
-        .def_readonly("reuse_cache_page_indice", &MlaParams::reuse_cache_page_indice)
-        .def_readonly("decode_page_indptr", &MlaParams::decode_page_indptr)
-        .def_readonly("prefill_page_indptr", &MlaParams::prefill_page_indptr)
-        .def_readonly("qo_indptr", &MlaParams::qo_indptr)
-        .def_readonly("batch_reuse_info_vec", &MlaParams::batch_reuse_info_vec);
-
     pybind11::class_<PyPrefillCudaGaphCopyParams>(m, "PyPrefillCudaGaphCopyParams")
         .def(pybind11::init<>())
         .def_readonly("cuda_graph_prefill_batch_size", &PyPrefillCudaGaphCopyParams::cuda_graph_prefill_batch_size)
@@ -67,6 +59,7 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
+        .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
@@ -78,10 +71,11 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
         .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
+        .def_readwrite("is_s_padded", &PyAttentionInputs::is_s_padded)
         .def_readonly("prefix_lengths_d", &PyAttentionInputs::prefix_lengths_d)
-        .def_readonly("sequence_lengths_plus_1_d", &PyAttentionInputs::sequence_lengths_plus_1_d)
+        .def_readwrite("sequence_lengths_plus_1_d", &PyAttentionInputs::sequence_lengths_plus_1_d)
         .def_readonly("input_lengths_d", &PyAttentionInputs::input_lengths_d)
-        .def_readonly("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
+        .def_readwrite("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
         .def_readonly("decode_cu_seqlens_host", &PyAttentionInputs::decode_cu_seqlens_host)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
@@ -120,26 +114,21 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
-        .def(pybind11::init<torch::Tensor, std::shared_ptr<rtp_llm::ParamsBase>>(),
-             pybind11::arg("hidden_states"),
-             pybind11::arg("params_ptr"),
-             "Initialize with hidden states tensor and params pointer")
         .def(pybind11::init<torch::Tensor>(),
              pybind11::arg("hidden_states"),
              "Initialize with hidden states tensor only (params_ptr defaults to nullptr)")
-        .def(pybind11::init<std::shared_ptr<rtp_llm::ParamsBase>>(),
-             pybind11::arg("params_ptr"),
-             "Initialize with params pointer only (hidden_states defaults to empty tensor)")
         .def(pybind11::init([](torch::Tensor hidden_states, pybind11::object params_obj) {
                  // Try to cast to shared_ptr, return nullptr if conversion fails
-                 std::shared_ptr<rtp_llm::ParamsBase> params_ptr = nullptr;
+                 std::shared_ptr<rtp_llm::ParamsBase> params_ptr     = nullptr;
+                 py::object                           py_attn_params = py::none();
                  try {
                      params_ptr = pybind11::cast<std::shared_ptr<rtp_llm::ParamsBase>>(params_obj);
                  } catch (const pybind11::cast_error& e) {
                      // Conversion failed, params_ptr remains nullptr
-                     RTP_LLM_LOG_INFO("Failed to cast params_obj to shared_ptr<ParamsBase>: %s", e.what());
+                     //  RTP_LLM_LOG_INFO("Failed to cast params_obj to shared_ptr<ParamsBase>: %s", e.what());
+                     py_attn_params = params_obj;
                  }
-                 return PyModelOutputs(hidden_states, params_ptr);
+                 return PyModelOutputs(hidden_states, params_ptr, py_attn_params);
              }),
              pybind11::arg("hidden_states"),
              pybind11::arg("params_ptr"),

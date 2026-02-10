@@ -8,22 +8,6 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
-struct MlaParams: public rtp_llm::ParamsBase {
-    torch::Tensor batch_indice;
-    torch::Tensor positions;
-    torch::Tensor paged_kv_last_page_len;
-    torch::Tensor kvlen;
-    torch::Tensor page_indice;
-    torch::Tensor reuse_cache_page_indice;
-    torch::Tensor decode_page_indptr;
-    torch::Tensor prefill_page_indptr;
-    torch::Tensor qo_indptr;
-    torch::Tensor batch_reuse_info_vec;
-
-    // Hidden field to keep FlashInferMlaAttnParams object alive
-    // This ensures the underlying buffers (buf_d, buf_h) are not deallocated
-    std::shared_ptr<void> _params_holder;
-};
 
 struct KVCache {
     torch::Tensor kv_cache_base;
@@ -88,8 +72,8 @@ struct PyAttentionInputs {
     torch::Tensor cu_kv_seqlens;
     torch::Tensor decode_cu_seqlens_host;
 
-    int           context_total_kv_length;
-    int           total_tokens = 0;
+    int           context_total_kv_length = 0;
+    int           total_tokens            = 0;
     torch::Tensor padding_offset;
 
     // for write cache store
@@ -102,6 +86,9 @@ struct PyAttentionInputs {
     torch::Tensor sequence_lengths_plus_1_d;
     torch::Tensor input_lengths_d;
     torch::Tensor decode_cu_seqlens_d;
+
+    // CUDA Graph mode flag
+    bool is_cuda_graph = false;
 };
 
 struct BertEmbeddingInputs {
@@ -122,17 +109,20 @@ struct PyModelInputs {
 struct PyModelOutputs {
     torch::Tensor          hidden_states;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
+    py::object             py_attn_params{py::none()};
 
     PyModelOutputs() = default;
-    PyModelOutputs(torch::Tensor hidden_states, std::shared_ptr<rtp_llm::ParamsBase> params_ptr):
-        hidden_states(std::move(hidden_states)), params_ptr(std::move(params_ptr)) {}
-
-    // Constructor with default values
-    PyModelOutputs(torch::Tensor hidden_states): hidden_states(std::move(hidden_states)), params_ptr(nullptr) {}
 
     // Constructor with default hidden_states
-    PyModelOutputs(std::shared_ptr<rtp_llm::ParamsBase> params_ptr):
-        hidden_states(torch::Tensor()), params_ptr(std::move(params_ptr)) {}
+    PyModelOutputs(torch::Tensor hidden_states):
+        hidden_states(std::move(hidden_states)), params_ptr(nullptr), py_attn_params(py::none()) {}
+
+    PyModelOutputs(torch::Tensor                        hidden_states,
+                   std::shared_ptr<rtp_llm::ParamsBase> params_ptr,
+                   py::object                           py_params = py::none()):
+        hidden_states(std::move(hidden_states)),
+        params_ptr(std::move(params_ptr)),
+        py_attn_params(std::move(py_params)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

@@ -615,8 +615,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     auto kv_head_num   = params.configs.kv_head_num;
     auto size_per_head = params.configs.size_per_head;
 
-    auto q_output = allocateBuffer(
-        {params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE}, {"q_output"});
+    auto q_output = use_mtp_pa_ ?
+                        allocateBuffer({params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE},
+                                       {"q_output"}) :
+                        allocateBuffer({params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE},
+                                       {"q_output"});
     auto k_output = allocateBuffer(
         {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
         {"k_output"});
@@ -659,7 +662,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         use_fmha_fp8 = false;
     }
     BufferPtr qkv_buf_fp8 = nullptr;
-    if (use_fmha_fp8) {
+    if (use_fmha_fp8 && !use_mtp_pa_) {
         qkv_buf_fp8 =
             allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape(), AllocationType::DEVICE}, {"qkv_buf_fp8"});
     }
@@ -668,7 +671,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     float* scale_out_ptr = nullptr;
     int    int8_mode     = 0;
 
-    if (prefix_prompt_param.max_prefix_prompt_length > 0) {
+    if (prefix_prompt_param.max_prefix_prompt_length > 0 && !use_mtp_pa_) {
         if (init_params_.use_aiter_pa) {
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
@@ -719,9 +722,9 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         }
     }
 
-    bool store_qkv   = true;
+    bool store_qkv   = !use_mtp_pa_;
     bool store_q     = true;
-    bool store_kv    = true;
+    bool store_kv    = !use_mtp_pa_;
     bool store_cache = params.common.kv_cache.has_value();
 
     // if all condition satisfy, no need to do invokeAddFusedQKVBiasTranspose
@@ -732,6 +735,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len, false);
 
         if (init_params_.use_aiter_pa) {
+            bool use_paged_fmha = use_mtp_pa_;
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                     datatype,
@@ -760,7 +764,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                     params.configs.use_logn_attn,
                     scale_out_ptr,
                     int8_mode,
-                    false,
+                    use_paged_fmha,
                     store_qkv,
                     store_q,
                     store_kv,
@@ -796,7 +800,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                     params.configs.use_logn_attn,
                     scale_out_ptr,
                     int8_mode,
-                    false,
+                    use_paged_fmha,
                     store_qkv,
                     store_q,
                     store_kv,
@@ -849,6 +853,16 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         writeCacheStore(params);
     }
 
+    if (use_mtp_pa_) {
+        if (seq_len <= 4) {
+            aiter_wrapper_->runTritonPA(params, this, *q_output, stream_);
+        }
+        else {
+            aiter_wrapper_->runHipPA(params, this, *q_output, stream_);
+        }
+        return;
+    }
+
     if (use_fmha_fp8) {
         fmha_runner_->setup(DataType::TYPE_FP8_E4M3,
                             params.configs.is_causal,
@@ -877,6 +891,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(*k_output, "run_ck_k_output");
     printBufferData(*v_output, "run_ck_v_output");
     printBufferData(params.input, "run_ck_input");
+
     if (skip_add_bias_transpose || prefix_prompt_param.max_prefix_prompt_length <= 0) {
         // not implemented reuse cache for this branch
         fmha_runner_->runCKFmha(use_fmha_fp8 ? qkv_buf_fp8->data() : params.input.data(),
@@ -1169,6 +1184,11 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                         && !params.configs.fuse_qkv_add_bias);
         printBufferData(*params.common.input_lengths, "input_lengths");
         if (!skip_add_bias_transpose) {
+            bool q_fp8 = false;
+            BufferPtr q_buf_fp8 = nullptr;
+            if (q_fp8) {
+                q_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3, q_output->shape(), AllocationType::DEVICE}, {"q_buf_fp8"});
+            }
             auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len, false);
 
             if (init_params_.use_asm_pa) {
@@ -1181,7 +1201,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                     &prefix_prompt_param,
                     input_lengths,
                     params.input.data(),
-                    nullptr,
+                    q_buf_fp8? q_buf_fp8->data(): nullptr,
                     params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
                     params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                         params.weights.qkv_weight->bias->data() :

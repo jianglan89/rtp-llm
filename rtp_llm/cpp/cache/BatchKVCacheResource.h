@@ -22,9 +22,9 @@ public:
         batch_resource.resize(batch_size);
     }
 
-    void initGroups(int group_nums) {
+    void initGroups(int group_nums, int layer_num) {
         for (auto& batch : batch_resource) {
-            batch.initGroups(group_nums);
+            batch.initGroups(group_nums, layer_num);
         }
     }
 
@@ -68,6 +68,11 @@ public:
         return batch_resource[batch_id];
     }
 
+    KVCacheResource& cacheResource(int batch_id = 0) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        return batch_resource[batch_id];
+    }
+
     void clearBlocks() {
         resizeBlocks(0, 0);
     }
@@ -104,9 +109,9 @@ public:
         batch_resource[batch_id].cacheKeys().push_back(key);
     }
 
-    void initBatchGroups(int batch_id, int group_nums) {
+    void initBatchGroups(int batch_id, int group_nums, int layer_num) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        batch_resource[batch_id].initGroups(group_nums);
+        batch_resource[batch_id].initGroups(group_nums, layer_num);
     }
 
     void setBatchBlocks(int batch_id, int group_id, const BlockIndicesType& blocks) {
@@ -170,9 +175,20 @@ public:
         return false;
     }
 
-public:
-    bool enable_reuse_cache = true;
-    bool last_block_aligned = true;
+    bool lastBlockAligned() const {
+        for (const auto& resource : batch_resource) {
+            if (!resource.lastBlockAligned()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void setLastBlockAligned(bool last_block_aligned) {
+        for (auto& resource : batch_resource) {
+            resource.setLastBlockAligned(last_block_aligned);
+        }
+    }
 
 private:
     std::vector<KVCacheResource> batch_resource;

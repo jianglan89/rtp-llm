@@ -27,8 +27,16 @@ flashinfer = [
     "flashinfer-python",
 ]
 
-deep_gemm = [
+flashinfer_with_cache = [
+    "apache-tvm-ffi",
+    "flashinfer-python",
+    "flashinfer-cubin",
+    "flashinfer-jit-cache"
+]
+
+deep = [
     "deep_gemm",
+    "deep_ep"
 ]
 
 xft_dep = select({
@@ -99,7 +107,6 @@ requirement([
     "librosa",
     "matplotlib", # required by qwen vl tokenizer
     "flash_attn",
-    "av",
     "pyrsmi",
     "amdsmi",
     "fast-safetensors",
@@ -109,10 +116,8 @@ requirement([
     "concurrent_log_handler",
     "aiter",
     "fastsafetensors",
-    "deep_ep",
-    "pytorch-triton-rocm",
     "pybind11_stubgen",
-] + tensorrt + flashinfer + deep_gemm)
+] + tensorrt + deep + flashinfer_with_cache)
 
 filegroup(
     name = "cutlass_config",
@@ -226,18 +231,21 @@ py_library(
         #":decord",
         ":nest_asyncio",
         ":matplotlib",
-        ":av",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
-        "@//:using_cuda": flashinfer + deep_gemm,
+        "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": tensorrt,
         "@//:cuda_pre_12_9": tensorrt,
         "//conditions:default": []
-    }) +
-    select({
+    }) + select({
+        "@//:using_cuda12_9_x86": flashinfer_with_cache,
+        "@//:using_cuda12_arm": flashinfer_with_cache,
+        "@//:cuda_pre_12_9": flashinfer,
+        "//conditions:default": []
+    }) + select({
         "@//:using_arm": [],
         "@//:using_cuda12_arm": [],
         # "//:xft_use_icx": [
@@ -252,7 +260,7 @@ py_library(
         "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": ["flash_attn"]
-    }) + triton_deps(["triton"]),
+    }) + triton_deps(["triton"]) + internal_deps(),
 )
 
 py_library(
@@ -475,7 +483,6 @@ py_library(
             ":embedding",
             "//rtp_llm/tools/convert:convert",
             ":aiter",
-            ":pytorch-triton-rocm",
         ],
         "//conditions:default": [
             ":models",
@@ -519,7 +526,7 @@ py_package(
     packages = [
         "rtp_llm",
     ] + select({
-        "@//:using_cuda12": ["deep_gemm"],
+        "@//:using_cuda12": deep,
         "//conditions:default": [],
     }),
 )
@@ -573,12 +580,11 @@ whl_reqs = [
     "partial_json_parser",
     "librosa",
     "matplotlib",
-    "av",
     "setproctitle",
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
-    "apache-tvm-ffi==0.1.1",
+    "apache-tvm-ffi",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
@@ -684,12 +690,7 @@ py_library(
     ],
     deps = [
         ":rtp_llm_lib",
-        "//rtp_llm/test/utils:bench_util",
-        "//rtp_llm/test/utils:numeric_util",
-        "//rtp_llm/test/utils:cuda_graph_util",
-        "//rtp_llm/test/utils:port_util",
-        "//rtp_llm/test/utils:device_resource",
-        "//rtp_llm/test/utils:stream_util",
+        "//rtp_llm/test/utils:test_util",
         "//deps:extension_lib",
         ":aiohttp",
     ]

@@ -1,5 +1,4 @@
 aiohttp
-av
 blobfile
 bitsandbytes>=0.41.0
 concurrent_log_handler
@@ -28,7 +27,7 @@ orjson
 oss2
 partial_json_parser
 Pillow
-pillow-avif-plugin
+pillow-avif-plugin==1.5.2
 pillow-heif
 portalocker
 prettytable

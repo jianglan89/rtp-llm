@@ -6,17 +6,17 @@ from typing import List
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference
-from base_attention_test import BaseAttentionDecodeTest, compare_tensors
+from base_attention_test import BaseAttentionTest, compare_tensors
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
 )
-from rtp_llm.ops.compute_ops import PyAttentionInputs, fill_mla_params
+from rtp_llm.ops.compute_ops import PyAttentionInputs, fill_mla_params, get_typemeta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-class TestPyFlashinferDecodeAttnOp(BaseAttentionDecodeTest):
+class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
     """Test suite for PyFlashinferDecodeAttnOp with correctness verification"""
 
     def _create_attention_inputs(
@@ -24,13 +24,16 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionDecodeTest):
         batch_size: int,
         sequence_lengths: List[int],
         seq_size_per_block: int,
+        dtype: torch.dtype = torch.float16,
     ) -> PyAttentionInputs:
         """Helper to create PyAttentionInputs for decode"""
-        return self._create_attention_inputs_base(
+        attn_inputs = self._create_attention_inputs_base(
             batch_size=batch_size,
             sequence_lengths=sequence_lengths,
             seq_size_per_block=seq_size_per_block,
         )
+        attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
+        return attn_inputs
 
     def _check_params(
         self,
@@ -76,11 +79,11 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionDecodeTest):
             block_offset += num_blocks
 
         # Get actual values from mla_params
-        actual_page_indptr = mla_params.decode_page_indptr.cpu().tolist()
-        actual_page_indices = mla_params.page_indice.cpu().tolist()[
+        actual_page_indptr = mla_params.decode_page_indptr_h.tolist()
+        actual_page_indices = mla_params.page_indice_h.tolist()[
             : len(expected_page_indices)
         ]
-        actual_last_page_len = mla_params.paged_kv_last_page_len.cpu().tolist()
+        actual_last_page_len = mla_params.paged_kv_last_page_len_h.tolist()
 
         # Verify each parameter
         if actual_page_indptr != expected_page_indptr:

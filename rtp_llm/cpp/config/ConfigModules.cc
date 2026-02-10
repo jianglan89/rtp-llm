@@ -90,14 +90,17 @@ std::string KVCacheConfig::to_string() const {
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
         << "threefs_write_iov_size: " << threefs_write_iov_size << "\n"
-        << "memory_block_cache_size_mb: " << memory_block_cache_size_mb << "\n"
-        << "memory_block_cache_sync_timeout_ms: " << memory_block_cache_sync_timeout_ms << "\n"
+        << "memory_cache_size_mb: " << memory_cache_size_mb << "\n"
+        << "memory_cache_sync_timeout_ms: " << memory_cache_sync_timeout_ms << "\n"
         << "int8_kv_cache: " << int8_kv_cache << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
         << "seq_size_per_block: " << seq_size_per_block << "\n"
         << "test_block_num: " << test_block_num << "\n"
-        << "use_block_cache: " << use_block_cache << "\n";
+        << "use_block_cache: " << use_block_cache << "\n"
+        << "enable_device_cache: " << enable_device_cache << "\n"
+        << "enable_memory_cache: " << enable_memory_cache << "\n"
+        << "write_cache_sync: " << write_cache_sync << "\n";
     return oss.str();
 }
 
@@ -168,8 +171,7 @@ std::string DeviceResourceConfig::to_string() const {
         << "overlap_comm_type: " << overlap_comm_type << "\n"
         << "m_split: " << m_split << "\n"
         << "enable_comm_overlap: " << enable_comm_overlap << "\n"
-        << "enable_layer_micro_batch: " << enable_layer_micro_batch << "\n"
-        << "not_use_default_stream: " << not_use_default_stream;
+        << "enable_layer_micro_batch: " << enable_layer_micro_batch;
     return oss.str();
 }
 
@@ -184,7 +186,8 @@ std::string MoeConfig::to_string() const {
         << "hack_moe_expert: " << hack_moe_expert << "\n"
         << "deep_ep_num_sm: " << deep_ep_num_sm << "\n"
         << "max_moe_normal_masked_token_num: " << max_moe_normal_masked_token_num << "\n"
-        << "use_all_gather: " << use_all_gather;
+        << "use_all_gather: " << use_all_gather << "\n"
+        << "ll_num_max_token: " << ll_num_max_token;
     return oss.str();
 }
 
