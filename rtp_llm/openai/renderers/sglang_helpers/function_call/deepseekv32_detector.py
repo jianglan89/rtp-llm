@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import List
+from typing import List, Optional
 
 from partial_json_parser.core.options import Allow
 
@@ -296,12 +296,17 @@ class DeepSeekV32Detector(BaseFormatDetector):
         self._buffer += new_text
         current_text = self._buffer
 
+        # ---- Separate plain text prefix from tool call data (avoid stream swallow) ----
+        tool_boundary = self._find_tool_boundary(current_text)
+        prefix_text = ""
+        if tool_boundary is not None and tool_boundary > 0:
+            prefix_text = current_text[:tool_boundary]
+            current_text = current_text[tool_boundary:]
+            self._buffer = current_text
+
         # Check if buffer contains any DSML markers or ends with potential tag prefix
-        # This handles partial/streaming DSML content
         dsml_markers = ["｜DSML｜", "<｜", "</｜"]
         potentially_dsml = any(marker in current_text for marker in dsml_markers)
-
-        # Also check if text ends with start of a tag (to handle "<" arriving separately)
         dsml_prefixes = ["<", "<｜", "</", "</｜"]
         ends_with_prefix = any(
             current_text.rstrip().endswith(prefix) for prefix in dsml_prefixes
@@ -316,7 +321,7 @@ class DeepSeekV32Detector(BaseFormatDetector):
             for e_token in [self.eot_token, self.invoke_end_token]:
                 if e_token in current_text:
                     current_text = current_text.replace(e_token, "")
-            return StreamingParseResult(normal_text=current_text)
+            return StreamingParseResult(normal_text=prefix_text + current_text)
 
         all_calls: list[ToolCallItem] = []
         try:
@@ -417,12 +422,21 @@ class DeepSeekV32Detector(BaseFormatDetector):
                     # Wait for more chunks until we see </｜DSML｜invoke>
                     break
 
-            # No more invoke blocks found
-            return StreamingParseResult(normal_text="", calls=all_calls)
+            # No more invoke blocks found (or broke on partial)
+            return StreamingParseResult(normal_text=prefix_text, calls=all_calls)
 
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
-            return StreamingParseResult(normal_text=current_text)
+            return StreamingParseResult(normal_text=prefix_text + current_text)
+
+    def _find_tool_boundary(self, text: str) -> Optional[int]:
+        """Find position of the earliest tool-related marker. Returns None if no marker."""
+        earliest = None
+        for marker in (self.bot_token, "<｜DSML｜invoke"):
+            idx = text.find(marker)
+            if idx != -1 and (earliest is None or idx < earliest):
+                earliest = idx
+        return earliest
 
     def structure_info(self) -> _GetInfoFunc:
         return lambda name: StructureInfo(

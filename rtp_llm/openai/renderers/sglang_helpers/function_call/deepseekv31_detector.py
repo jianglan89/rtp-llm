@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import List
+from typing import List, Optional
 
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import Tool
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
@@ -49,12 +49,16 @@ class DeepSeekV31Detector(BaseFormatDetector):
         super().__init__()
         self.bot_token = "<｜tool▁calls▁begin｜>"
         self.eot_token = "<｜tool▁calls▁end｜>"
+        self.tool_call_start = "<｜tool▁call▁begin｜>"
+        self.tool_call_end = "<｜tool▁call▁end｜>"
         self.func_call_regex = r"<｜tool▁call▁begin｜>.*?<｜tool▁call▁end｜>"
         self.func_detail_regex = (
             r"<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*)<｜tool▁call▁end｜>"
         )
         self._last_arguments = ""
         self.current_tool_id = -1
+        # Markers for _find_tool_boundary (prefix ends before earliest)
+        self._tool_boundary_markers = (self.bot_token, self.tool_call_start)
 
     def has_tool_call(self, text: str) -> bool:
         """Check if the text contains a deepseek format tool call."""
@@ -118,22 +122,49 @@ class DeepSeekV31Detector(BaseFormatDetector):
         self._buffer += new_text
         current_text = self._buffer
 
-        # MTP-safe path: Parse any complete tool call blocks first
+        # ---- Separate plain text prefix from tool call data ----
+        # Find the earliest tool-related marker in buffer.
+        # Any text before it is plain content that must be emitted immediately,
+        # not trapped in the buffer. This fixes the bug where trailing chars
+        # (e.g. ">" from "</thinking>") get swallowed when they arrive in the
+        # same MTP chunk as a tool marker.
+        tool_boundary = self._find_tool_boundary(current_text)
+
+        if tool_boundary is None:
+            # No marker yet: emit full buffer as normal text (don't return only new_text
+            # or incremental streaming would lose accumulated content)
+            self._buffer = ""
+            for e_token in [self.eot_token, self.tool_call_end]:
+                if e_token in current_text:
+                    current_text = current_text.replace(e_token, "")
+            return StreamingParseResult(normal_text=current_text)
+
+        prefix_text = ""
+        if tool_boundary > 0:
+            prefix_text = current_text[:tool_boundary]
+            current_text = current_text[tool_boundary:]
+            self._buffer = current_text
+
+        # ---- MTP-safe path: Parse any complete tool call blocks ----
         # This handles MTP scenarios where multiple tokens arrive in single chunk
-        tool_call_start = "<｜tool▁call▁begin｜>"
-        tool_call_end = "<｜tool▁call▁end｜>"
         collected_calls: list[ToolCallItem] = []
 
-        while tool_call_start in current_text and tool_call_end in current_text:
-            start_idx = current_text.find(tool_call_start)
-            end_idx = current_text.find(tool_call_end)
+        while (
+            self.tool_call_start in current_text and self.tool_call_end in current_text
+        ):
+            start_idx = current_text.find(self.tool_call_start)
+            # Search for end marker AFTER start to avoid matching
+            # a residual end marker that precedes the current begin
+            end_idx = current_text.find(
+                self.tool_call_end, start_idx + len(self.tool_call_start)
+            )
 
-            # Only process if we have a complete block (end comes after start)
-            if end_idx <= start_idx:
+            # No valid complete block
+            if end_idx == -1:
                 break
 
             # Extract the complete tool call block
-            block_end = end_idx + len(tool_call_end)
+            block_end = end_idx + len(self.tool_call_end)
             complete_block = current_text[start_idx:block_end]
 
             # Try to parse with the full regex
@@ -185,20 +216,13 @@ class DeepSeekV31Detector(BaseFormatDetector):
 
         # If we parsed any complete blocks, return those results
         if collected_calls:
-            return StreamingParseResult(normal_text="", calls=collected_calls)
+            return StreamingParseResult(normal_text=prefix_text, calls=collected_calls)
 
-        # Check if we have a tool call (either the start token or individual tool call)
-        has_tool_call = (
-            self.bot_token in current_text or "<｜tool▁call▁begin｜>" in current_text
-        )
+        # No complete blocks but have prefix → emit prefix first
+        if prefix_text:
+            return StreamingParseResult(normal_text=prefix_text)
 
-        if not has_tool_call:
-            self._buffer = ""
-            for e_token in [self.eot_token, "<｜tool▁call▁end｜>"]:
-                if e_token in new_text:
-                    new_text = new_text.replace(e_token, "")
-            return StreamingParseResult(normal_text=new_text)
-
+        # ---- Incremental parsing for incomplete tool call ----
         if not hasattr(self, "_tool_indices"):
             self._tool_indices = self._get_tool_indices(tools)
 
@@ -293,6 +317,18 @@ class DeepSeekV31Detector(BaseFormatDetector):
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
             return StreamingParseResult(normal_text=current_text)
+
+    def _find_tool_boundary(self, text: str) -> Optional[int]:
+        """Find position of the earliest tool-related marker in text.
+
+        Returns None if no marker is found.
+        """
+        earliest = None
+        for marker in self._tool_boundary_markers:
+            idx = text.find(marker)
+            if idx != -1 and (earliest is None or idx < earliest):
+                earliest = idx
+        return earliest
 
     def structure_info(self) -> _GetInfoFunc:
         return lambda name: StructureInfo(

@@ -106,24 +106,27 @@ class Qwen25Detector(BaseFormatDetector):
         """
         self._buffer += new_text
 
+        # ---- Separate plain text prefix from tool call data (avoid stream swallow) ----
+        # Only strip prefix when we actually see bot_token; otherwise fall through so
+        # incremental streaming (e.g. "<tool_call>" then "\n" then "...") can accumulate.
+        bot_idx = self._buffer.find(self.bot_token)
+        prefix_text = ""
+        if bot_idx > 0:
+            prefix_text = self._buffer[:bot_idx]
+            self._buffer = self._buffer[bot_idx:]
+
         collected_calls: list = []
         collected_normal_text = ""
 
         # MTP-safe path: Parse any complete tool call blocks first
-        # This handles MTP scenarios where multiple tokens arrive in single chunk
         while self.bot_token in self._buffer and self.eot_token in self._buffer:
             bot_idx = self._buffer.find(self.bot_token)
-            eot_idx = self._buffer.find(self.eot_token)
-
-            # Only process if we have a complete block (eot comes after bot)
+            eot_idx = self._buffer.find(self.eot_token, bot_idx + len(self.bot_token))
+            if eot_idx == -1:
+                break
             if eot_idx <= bot_idx:
                 break
 
-            # Extract text before tool call as normal text
-            if bot_idx > 0:
-                collected_normal_text += self._buffer[:bot_idx]
-
-            # Extract and parse the complete tool call block
             block_end = eot_idx + len(self.eot_token)
             complete_block = self._buffer[bot_idx:block_end]
 
@@ -165,21 +168,19 @@ class Qwen25Detector(BaseFormatDetector):
 
         # If we parsed any complete blocks, return those results
         if collected_calls or collected_normal_text:
-            # Reset buffer for base class if we're switching to incremental mode
             remaining = self._buffer
             self._buffer = ""
-            # If there's remaining content that might be partial, handle with base class
             if remaining:
                 self._buffer = remaining
             return StreamingParseResult(
-                normal_text=collected_normal_text, calls=collected_calls
+                normal_text=prefix_text + collected_normal_text, calls=collected_calls
             )
 
         # Fall back to base class incremental parsing for partial data
-        # Reset buffer since we're passing to base class which will re-accumulate
         remaining = self._buffer
         self._buffer = ""
         result = super().parse_streaming_increment(remaining, tools)
+        result.normal_text = prefix_text + (result.normal_text or "")
 
         # Handle partial end tokens that are streamed character by character
         if result.normal_text:

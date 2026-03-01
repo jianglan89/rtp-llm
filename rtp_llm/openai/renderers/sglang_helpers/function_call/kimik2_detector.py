@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import List
+from typing import List, Optional
 
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import Tool
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
@@ -132,21 +132,37 @@ class KimiK2Detector(BaseFormatDetector):
         self._buffer += new_text
         current_text = self._buffer
 
-        # MTP-safe path: Parse any complete tool call blocks first
-        # This handles MTP scenarios where multiple tokens arrive in single chunk
+        # ---- Separate plain text prefix from tool call data ----
+        tool_boundary = self._find_tool_boundary(current_text)
+
+        if tool_boundary is None:
+            # No marker yet: emit full buffer as normal text (don't return only new_text
+            # or incremental streaming would lose accumulated content)
+            self._buffer = ""
+            for e_token in [self.eot_token, self.tool_call_end_token]:
+                if e_token in current_text:
+                    current_text = current_text.replace(e_token, "")
+            return StreamingParseResult(normal_text=current_text)
+
+        prefix_text = ""
+        if tool_boundary > 0:
+            prefix_text = current_text[:tool_boundary]
+            current_text = current_text[tool_boundary:]
+            self._buffer = current_text
+
+        # ---- MTP-safe path: Parse any complete tool call blocks ----
         collected_calls: list[ToolCallItem] = []
         while (
             self.tool_call_start_token in current_text
             and self.tool_call_end_token in current_text
         ):
             start_idx = current_text.find(self.tool_call_start_token)
-            end_idx = current_text.find(self.tool_call_end_token)
-
-            # Only process if we have a complete block (end comes after start)
-            if end_idx <= start_idx:
+            end_idx = current_text.find(
+                self.tool_call_end_token, start_idx + len(self.tool_call_start_token)
+            )
+            if end_idx == -1:
                 break
 
-            # Extract the complete tool call block
             block_end = end_idx + len(self.tool_call_end_token)
             complete_block = current_text[start_idx:block_end]
 
@@ -201,9 +217,13 @@ class KimiK2Detector(BaseFormatDetector):
 
         # If we parsed any complete blocks, return those results
         if collected_calls:
-            return StreamingParseResult(normal_text="", calls=collected_calls)
+            return StreamingParseResult(normal_text=prefix_text, calls=collected_calls)
 
-        # Check if we have a tool call (either the start token or individual tool call)
+        # No complete blocks but have prefix → emit prefix first
+        if prefix_text:
+            return StreamingParseResult(normal_text=prefix_text)
+
+        # ---- Incremental parsing for incomplete tool call ----
         has_tool_call = (
             self.bot_token in current_text or self.tool_call_start_token in current_text
         )
@@ -211,9 +231,9 @@ class KimiK2Detector(BaseFormatDetector):
         if not has_tool_call:
             self._buffer = ""
             for e_token in [self.eot_token, self.tool_call_end_token]:
-                if e_token in new_text:
-                    new_text = new_text.replace(e_token, "")
-            return StreamingParseResult(normal_text=new_text)
+                if e_token in current_text:
+                    current_text = current_text.replace(e_token, "")
+            return StreamingParseResult(normal_text=current_text)
 
         if not hasattr(self, "_tool_indices"):
             self._tool_indices = self._get_tool_indices(tools)
@@ -311,6 +331,15 @@ class KimiK2Detector(BaseFormatDetector):
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
             return StreamingParseResult(normal_text=current_text)
+
+    def _find_tool_boundary(self, text: str) -> Optional[int]:
+        """Find position of the earliest tool-related marker in text. Returns None if no marker."""
+        earliest = None
+        for marker in (self.bot_token, self.tool_call_start_token):
+            idx = text.find(marker)
+            if idx != -1 and (earliest is None or idx < earliest):
+                earliest = idx
+        return earliest
 
     def structure_info(self) -> _GetInfoFunc:
         """Return function that creates StructureInfo for guided generation."""
