@@ -241,3 +241,27 @@ cc_library(
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "kernels_nan_check",
+    srcs = ["nan_check_kernels.cu"],
+    hdrs = ["nan_check_kernels.h"],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = any_cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "nan_check_torch_op",
+    srcs = ["nan_check_torch_op.cc"],
+    hdrs = ["nan_check_torch_op.h"],
+    deps = [
+        ":kernels_nan_check",
+        "//rtp_llm/cpp/core:types_hdr",
+        "//rtp_llm/cpp/core:dispatch",
+    ] + any_cuda_deps + torch_deps(),
+    copts = any_cuda_copts(),
+    visibility = ["//visibility:public"],
+)
