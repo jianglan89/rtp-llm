@@ -265,3 +265,27 @@ cc_library(
     copts = any_cuda_copts(),
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "kernels_block_zero",
+    srcs = ["block_zero_kernels.cu"],
+    hdrs = ["block_zero_kernels.h"],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = any_cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "block_zero_torch_op",
+    srcs = ["block_zero_torch_op.cc"],
+    hdrs = ["block_zero_torch_op.h"],
+    deps = [
+        ":kernels_block_zero",
+        "//rtp_llm/cpp/core:types_hdr",
+        "//rtp_llm/cpp/core:dispatch",
+    ] + any_cuda_deps + torch_deps(),
+    copts = any_cuda_copts(),
+    visibility = ["//visibility:public"],
+)
