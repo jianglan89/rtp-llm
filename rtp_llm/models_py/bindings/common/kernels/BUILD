@@ -248,6 +248,7 @@ cc_library(
     hdrs = ["nan_check_kernels.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/utils:math_utils",
     ],
     copts = any_cuda_copts(),
     visibility = ["//visibility:public"],
