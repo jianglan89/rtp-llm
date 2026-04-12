@@ -260,7 +260,6 @@ cc_library(
     deps = [
         ":kernels_nan_check",
         "//rtp_llm/cpp/core:types_hdr",
-        "//rtp_llm/cpp/core:dispatch",
     ] + any_cuda_deps + torch_deps(),
     copts = any_cuda_copts(),
     visibility = ["//visibility:public"],
@@ -284,7 +283,6 @@ cc_library(
     deps = [
         ":kernels_block_zero",
         "//rtp_llm/cpp/core:types_hdr",
-        "//rtp_llm/cpp/core:dispatch",
     ] + any_cuda_deps + torch_deps(),
     copts = any_cuda_copts(),
     visibility = ["//visibility:public"],
