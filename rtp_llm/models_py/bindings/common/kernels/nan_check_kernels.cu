@@ -25,11 +25,11 @@
 #include "rtp_llm/models_py/bindings/common/kernels/nan_check_kernels.h"
 
 #if USING_CUDA
-#include "rtp_llm/cpp/kernels/vec_dtypes.cuh"
+#include "rtp_llm/models_py/bindings/cuda/kernels/vec_dtypes.cuh"
 #endif
 
 #if USING_ROCM
-#include "rtp_llm/cpp/kernels/rocm_utils/vec_dtypes_hip.h"
+#include "rtp_llm/models_py/bindings/rocm/kernels/rocm_utils/vec_dtypes_hip.h"
 #endif
 
 namespace rtp_llm {
