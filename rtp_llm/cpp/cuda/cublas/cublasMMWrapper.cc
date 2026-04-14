@@ -30,34 +30,34 @@
 #endif
 
 namespace rtp_llm {
+
+// 128 MB workspace for cublasLt GEMM.
+// Large workspace ensures the heuristic returns enough candidate algorithms
+// (including splitK<=1 for deterministic mode).
+static constexpr uint64_t CUBLAS_WORKSPACE_SIZE = 134217728;
 cublasMMWrapper::cublasMMWrapper(cublasHandle_t   cublas_handle,
                                  cublasLtHandle_t cublaslt_handle,
                                  cudaStream_t     stream,
                                  cublasAlgoMap*   cublas_algo_map,
-                                 std::mutex*      mu,
-                                 IAllocator*      allocator):
+                                 std::mutex*      mu):
     cublas_handle_(cublas_handle),
     cublaslt_handle_(cublaslt_handle),
     stream_(stream),
     cublas_algo_map_(cublas_algo_map),
-    mutex_(mu),
-    allocator_(allocator) {
+    mutex_(mu) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    if (allocator_ != nullptr) {
-        cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE);
-    }
+    cublas_workspace_tensor_ = torch::empty({static_cast<int64_t>(CUBLAS_WORKSPACE_SIZE)},
+                                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    cublas_workspace_        = cublas_workspace_tensor_.data_ptr();
 }
 
 cublasMMWrapper::~cublasMMWrapper() {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    mutex_ = nullptr;
-    if (allocator_ != nullptr) {
-        allocator_->free((void**)(&cublas_workspace_));
-        for (size_t i = 0; i < additional_cublas_workspaces_.size(); i++) {
-            allocator_->free((void**)(&additional_cublas_workspaces_[i]));
-        }
-        allocator_ = nullptr;
-    }
+    mutex_                   = nullptr;
+    cublas_workspace_        = nullptr;
+    cublas_workspace_tensor_ = torch::Tensor();
+    additional_cublas_workspaces_.clear();
+    additional_workspace_tensors_.clear();
 }
 
 cublasMMWrapper::cublasMMWrapper(const cublasMMWrapper& wrapper):
@@ -65,12 +65,11 @@ cublasMMWrapper::cublasMMWrapper(const cublasMMWrapper& wrapper):
     cublaslt_handle_(wrapper.cublaslt_handle_),
     stream_(wrapper.stream_),
     cublas_algo_map_(wrapper.cublas_algo_map_),
-    mutex_(wrapper.mutex_),
-    allocator_(wrapper.allocator_) {
+    mutex_(wrapper.mutex_) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    if (allocator_ != nullptr) {
-        cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE);
-    }
+    cublas_workspace_tensor_ = torch::empty({static_cast<int64_t>(CUBLAS_WORKSPACE_SIZE)},
+                                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    cublas_workspace_        = cublas_workspace_tensor_.data_ptr();
 }
 
 void cublasMMWrapper::Gemm(cublasOperation_t transa,
@@ -211,9 +210,10 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t          handle,
     uint64_t             workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
     if (stream != stream_) {
         if (cublas_workspces_map_.count(stream) == 0) {
-            void* additional_cublas_workspace = nullptr;
-            additional_cublas_workspace = allocator_->reMalloc(additional_cublas_workspace, CUBLAS_WORKSPACE_SIZE);
-            additional_cublas_workspaces_.push_back(additional_cublas_workspace);
+            auto tensor = torch::empty({static_cast<int64_t>(CUBLAS_WORKSPACE_SIZE)},
+                                       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            additional_workspace_tensors_.push_back(tensor);
+            additional_cublas_workspaces_.push_back(tensor.data_ptr());
             cublas_workspces_map_[stream] = additional_cublas_workspaces_.size() - 1;
         }
         workSpace     = additional_cublas_workspaces_[cublas_workspces_map_[stream]];
@@ -703,16 +703,12 @@ std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findHeuristicAlgo(cublasL
                                                                          cublasLtMatrixLayout_t Cdesc,
                                                                          void*                  D,
                                                                          cublasLtMatrixLayout_t Ddesc) {
-#if (CUBLAS_VERSION) <= 11402
-    RTP_LLM_FAIL("CUBLAS version too low.");
-    return {false, cublasLtMatmulAlgo_t{}};
-#else
     size_t  returnSize;
     int32_t pointer_mode;
     check_cuda_value(cublasLtMatmulDescGetAttribute(
         computeDesc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode), &returnSize));
 
-    cublasLtMatmulHeuristicResult_t result;
+    cublasLtMatmulHeuristicResult_t results[1];
     cublasLtMatmulPreference_t      preference;
     check_cuda_value(cublasLtMatmulPreferenceCreate(&preference));
     autil::ScopeGuard guard1([&]() { cublasLtMatmulPreferenceDestroy(preference); });
@@ -720,19 +716,69 @@ std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findHeuristicAlgo(cublasL
     uint64_t workspace_size = CUBLAS_WORKSPACE_SIZE;
     check_cuda_value(cublasLtMatmulPreferenceSetAttribute(
         preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_size, sizeof(workspace_size)));
-#if (CUBLAS_VERSION) <= 12000
-    uint32_t pointer_mode_mask = 0;
-    check_cuda_value(cublasLtMatmulPreferenceSetAttribute(
-        preference, CUBLASLT_MATMUL_PREF_EPILOGUE_MASK, &pointer_mode_mask, sizeof(pointer_mode_mask)));
-#endif
 
     int  return_count = 0;
     auto ret          = cublasLtMatmulAlgoGetHeuristic(
-        lightHandle, computeDesc, Adesc, Bdesc, Cdesc, Ddesc, preference, 1, &result, &return_count);
+        lightHandle, computeDesc, Adesc, Bdesc, Cdesc, Ddesc, preference, 1, results, &return_count);
     check_cuda_value(ret);
 
-    return {return_count != 0, result.algo};
-#endif
+    if (return_count == 0) {
+        return {false, cublasLtMatmulAlgo_t{}};
+    }
+
+    return {true, results[0].algo};
+}
+
+std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findDeterministicAlgo(cublasLtHandle_t       lightHandle,
+                                                                             cublasLtMatmulDesc_t   computeDesc,
+                                                                             cublasLtMatrixLayout_t Adesc,
+                                                                             cublasLtMatrixLayout_t Bdesc,
+                                                                             cublasLtMatrixLayout_t Cdesc,
+                                                                             cublasLtMatrixLayout_t Ddesc) {
+    // Query up to 64 heuristic candidates and select the first one with splitK<=1.
+    // Using split-K > 1 causes non-determinism via inplace atomic reductions whose FP
+    // accumulation order depends on the GPU threadblock scheduler.  We query 64 candidates
+    // to cover small-m shapes (e.g. m=5 or m=20 in beam search) where the top few are
+    // often all split-K.
+    // Hard-fail rather than silently falling back to a non-deterministic algorithm.
+    static constexpr int            kMaxCandidates = 64;
+    cublasLtMatmulHeuristicResult_t candidates[kMaxCandidates];
+    cublasLtMatmulPreference_t      pref;
+    check_cuda_value(cublasLtMatmulPreferenceCreate(&pref));
+    autil::ScopeGuard guard([&]() { cublasLtMatmulPreferenceDestroy(pref); });
+    check_cuda_value(cublasLtMatmulPreferenceInit(pref));
+    uint64_t workspace_size = CUBLAS_WORKSPACE_SIZE;
+    check_cuda_value(cublasLtMatmulPreferenceSetAttribute(
+        pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_size, sizeof(workspace_size)));
+
+    int candidate_count = 0;
+    check_cuda_value(cublasLtMatmulAlgoGetHeuristic(
+        lightHandle, computeDesc, Adesc, Bdesc, Cdesc, Ddesc, pref, kMaxCandidates, candidates, &candidate_count));
+
+    int chosen = -1;
+    for (int i = 0; i < candidate_count; ++i) {
+        size_t sz;
+        int    splitK_val = 0;
+        cublasLtMatmulAlgoConfigGetAttribute(
+            &candidates[i].algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &splitK_val, sizeof(splitK_val), &sz);
+        if (splitK_val <= 1) {
+            chosen = i;
+            break;
+        }
+    }
+    if (chosen < 0 && candidate_count > 0) {
+        chosen                  = 0;
+        int      one            = 1;
+        uint32_t reduction_none = CUBLASLT_REDUCTION_SCHEME_NONE;
+        cublasLtMatmulAlgoConfigSetAttribute(
+            &candidates[chosen].algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &one, sizeof(one));
+        cublasLtMatmulAlgoConfigSetAttribute(
+            &candidates[chosen].algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &reduction_none, sizeof(reduction_none));
+        RTP_LLM_LOG_DEBUG("DETERMINISTIC_GEMM: forced splitK=1 on best candidate (all %d had splitK>1)",
+                          candidate_count);
+    }
+    RTP_LLM_CHECK_WITH_INFO(candidate_count > 0, "DETERMINISTIC_GEMM: cublasLt returned zero candidate algorithms");
+    return {true, candidates[chosen].algo};
 }
 
 std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findBestAlgo(cublasLtHandle_t       lightHandle,
@@ -889,7 +935,9 @@ cublasStatus_t cublasMMWrapper::cublasLtMatmulWrapper(cublasLtHandle_t          
         auto it = algo_cache.find(cache_idx);
         if (it == algo_cache.end()) {
             std::pair<bool, cublasLtMatmulAlgo_t> result;
-            if (findBest) {
+            if (deterministic_gemm_) {
+                result = findDeterministicAlgo(lightHandle, computeDesc, Adesc, Bdesc, Cdesc, Ddesc);
+            } else if (findBest) {
                 result =
                     findBestAlgo(lightHandle, computeDesc, alpha, A, Adesc, B, Bdesc, beta, C, Cdesc, D, Ddesc, stream);
             } else {

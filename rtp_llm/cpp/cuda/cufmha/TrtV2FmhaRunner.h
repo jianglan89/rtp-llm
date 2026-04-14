@@ -3,7 +3,6 @@
 #include <memory>
 #include <cuda_runtime.h>
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/cuda/cufmha/TRTAttn.h"
 #include "3rdparty/contextFusedMultiHeadAttention/fmhaRunner.h"
@@ -37,7 +36,7 @@ struct TrtV2FmhaRunnerConfig {
         return TrtV2FmhaRunnerConfig{configs.head_num,
                                      configs.kv_head_num,
                                      configs.size_per_head,
-                                     configs.tokens_per_block,
+                                     configs.kernel_tokens_per_block,
                                      configs.is_causal,
                                      configs.q_scaling,
                                      configs.softmax_extra_scale};
@@ -56,6 +55,10 @@ public:
 
     bool trtV2PagedFmhaSupported() const {
         return support_trt_v2_paged_fmha_;
+    }
+
+    bool isSPadded() const {
+        return is_s_padded_;
     }
 
     void runTrtV2Fmha(void*        input,
@@ -119,7 +122,7 @@ private:
 };
 
 std::shared_ptr<TRTAttn> prepareTrtAttnParams(const AttentionConfigs& configs,
-                                              const BufferPtr&        kv_cache_block_id,
+                                              const torch::Tensor&    kv_cache_block_id,
                                               int                     batch_size,
                                               bool                    use_fp8_fmha,
                                               cudaStream_t            stream,

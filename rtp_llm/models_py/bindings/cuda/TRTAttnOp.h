@@ -12,7 +12,6 @@ class TrtV2FmhaRunner;
 struct TRTAttn;
 using TRTAttnPtr = std::shared_ptr<TRTAttn>;
 
-
 class TRTPrefillOpBase {
 public:
     TRTPrefillOpBase(const AttentionConfigs& attn_configs);
@@ -21,7 +20,7 @@ public:
     virtual ParamsBasePtr prepare(torch_ext::PyAttentionInputs attn_inputs);
 
     virtual torch::Tensor
-    forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const TRTAttnPtr& params) = 0;
+    forward(const torch::Tensor& input, std::optional<torch_ext::LayerKVCache> kv_cache, const TRTAttnPtr& params) = 0;
 
 protected:
     std::shared_ptr<TrtV2FmhaRunner> trt_v2_runner_;
@@ -32,19 +31,22 @@ protected:
 class TRTPagedPrefillOp: public TRTPrefillOpBase {
 public:
     using TRTPrefillOpBase::TRTPrefillOpBase;
-    bool support(torch_ext::PyAttentionInputs attn_inputs);
-    torch::Tensor
-    forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const TRTAttnPtr& params) override;
+    bool          support(torch_ext::PyAttentionInputs attn_inputs);
+    torch::Tensor forward(const torch::Tensor&                   input,
+                          std::optional<torch_ext::LayerKVCache> kv_cache,
+                          const TRTAttnPtr&                      params) override;
 };
 
 class TRTNormalPrefillOp: public TRTPrefillOpBase {
 public:
     using TRTPrefillOpBase::TRTPrefillOpBase;
-    bool support(torch_ext::PyAttentionInputs attn_inputs);
-    torch::Tensor
-    forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const TRTAttnPtr& params) override;
+    bool          support(torch_ext::PyAttentionInputs attn_inputs);
+    torch::Tensor forward(const torch::Tensor&                   input,
+                          std::optional<torch_ext::LayerKVCache> kv_cache,
+                          const TRTAttnPtr&                      params) override;
 };
 
 void registerTRTAttnOp(const py::module& m);
+void registerTRTAttn(const py::module& m);
 
 }  // namespace rtp_llm

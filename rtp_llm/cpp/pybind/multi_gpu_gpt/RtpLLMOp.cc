@@ -14,9 +14,6 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 
 using namespace std;
@@ -209,6 +206,8 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 py_model,
                                 weight_manager,
                                 py_eplb);
+        params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
+        params.server_config    = engine_config.attr("server_config");
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init
@@ -285,13 +284,14 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                              py::object                                    mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor) {
-    auto http_port      = maga_init_params.parallelism_config.http_port;
-    auto model_rpc_port = maga_init_params.parallelism_config.model_rpc_port;
-    auto role_type      = maga_init_params.pd_sep_config.role_type;
-    // NOTE: ip/ip段可自定义为所需范围。
-    std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
+    std::string server_address;
     {
         pybind11::gil_scoped_acquire acquire;
+        int64_t                      http_port = maga_init_params.server_config.attr("http_port").cast<int64_t>();
+        int64_t model_rpc_port                 = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
+        auto    role_type                      = maga_init_params.pd_sep_config.role_type;
+        // NOTE: ip/ip段可自定义为所需范围。
+        server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
             model_rpc_service_.reset(new RemoteRpcServiceImpl());
         } else {
@@ -335,7 +335,6 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
 }
 
 void RtpLLMOp::startHttpServer(py::object model_weights_loader,
-                               py::object lora_infos,
                                py::object world_info,
                                py::object tokenizer,
                                py::object render) {
@@ -343,7 +342,7 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
         RTP_LLM_FAIL("normal HTTP Server nullptr error.");
         return;
     }
-    if (http_server_->start(model_weights_loader, lora_infos, world_info, tokenizer, render)) {
+    if (http_server_->start(model_weights_loader, world_info, tokenizer, render)) {
         RTP_LLM_LOG_INFO("normal HTTP Server listening on %s", http_server_->getListenAddr().c_str());
     } else {
         RTP_LLM_FAIL("normal HTTP Server start fail.");
@@ -410,7 +409,6 @@ void registerRtpLLMOp(const py::module& m) {
         .def("start_http_server",
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),
-             py::arg("lora_infos"),
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))

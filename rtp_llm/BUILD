@@ -31,12 +31,28 @@ flashinfer_with_cache = [
     "apache-tvm-ffi",
     "flashinfer-python",
     "flashinfer-cubin",
+    "nvidia-cutlass-dsl",
     "flashinfer-jit-cache"
+]
+
+flashmla = [
+    "fast-hadamard-transform",
+    "flash-mla",
+    "tilelang",
 ]
 
 deep = [
     "deep_gemm",
     "deep_ep"
+]
+
+rtp_kernel = [
+    "rtp-kernel"
+]
+
+flashattn = [
+    "flash_attn",
+    "flash-attn-3"
 ]
 
 xft_dep = select({
@@ -77,6 +93,7 @@ requirement([
     "uvicorn",
     "fastapi",
     "psutil",
+    "pyarrow",
     "pyodps",
     "thrift",
     "torch",
@@ -106,7 +123,6 @@ requirement([
     "partial_json_parser",
     "librosa",
     "matplotlib", # required by qwen vl tokenizer
-    "flash_attn",
     "pyrsmi",
     "amdsmi",
     "fast-safetensors",
@@ -117,7 +133,7 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-] + tensorrt + deep + flashinfer_with_cache)
+] + tensorrt + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 filegroup(
     name = "cutlass_config",
@@ -241,9 +257,19 @@ py_library(
         "@//:cuda_pre_12_9": tensorrt,
         "//conditions:default": []
     }) + select({
-        "@//:using_cuda12_9_x86": flashinfer_with_cache,
-        "@//:using_cuda12_arm": flashinfer_with_cache,
+        "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
+        "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
+        "//conditions:default": []
+    }) + select({
+        "@//:using_cuda12_9_x86": rtp_kernel,
+        "@//:using_cuda12_arm": rtp_kernel,
+        "@//:cuda_pre_12_9": [],
+        "//conditions:default": []
+    }) + select({
+        "@//:using_cuda12_9_x86": flashattn,
+        "@//:using_cuda12_arm": flashattn,
+        "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
@@ -259,7 +285,7 @@ py_library(
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
-        "//conditions:default": ["flash_attn"]
+        "//conditions:default": []
     }) + triton_deps(["triton"]) + internal_deps(),
 )
 
@@ -460,6 +486,7 @@ py_library(
         ":lora",
         ":sdk",
         ":frontend",
+        ":embedding",
         "//rtp_llm/tools:model_assistant",
         "//rtp_llm/distribute:distribute",
         ":tokenizer",
@@ -551,6 +578,7 @@ whl_reqs = [
     "tiktoken==0.7.0",
     "lru-dict",
     "py-spy",
+    "pyarrow==14.0.0",
     "safetensors",
     "cpm_kernels",
     "pyodps",

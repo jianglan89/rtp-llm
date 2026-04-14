@@ -10,13 +10,15 @@ logging.basicConfig(
     format="[process-%(process)d][%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+
 class Qwen3AutoPyModelTest(TestCase):
 
     def setUp(self):
         # test_msg1 consist of 20 tokens
         self.test_msg1 = [{"role": "user", "content": "你好，请用较长篇幅介绍自己"}]
         self.max_new_tokens1 = 45
-        self.expected_output_text1 = "你好！我是你的AI助手，我是一个基于深度学习的多模态语言模型，专为用户提供自然、流畅的对话体验。我能够理解多种语言，包括中文、英文、西班牙语、法语"
+        self.expected_output_text1 = "你好！我是你的虚拟助手，一个专注于帮助你解决问题和提供支持的AI助手。我是一个基于深度学习的多模态语言模型，能够理解多种语言，并且具备自然对话、信息查询、写作"
 
         self.test_msg2 = [{"role": "user", "content": "3.9和3.11哪个大"}]
         self.max_new_tokens2 = 50
@@ -26,7 +28,7 @@ class Qwen3AutoPyModelTest(TestCase):
         self.tokens_per_block = 2
 
         self.model = AutoModel.from_pretrained(
-            model_path_or_name="Qwen/Qwen3-0.6B",
+            model_path_or_name="/mnt/nas1/hf/Qwen3-0___6B",
             max_total_tokens=self.max_total_tokens,
             tokens_per_block=self.tokens_per_block,
         )
@@ -74,4 +76,3 @@ class Qwen3AutoPyModelTest(TestCase):
 
 if __name__ == "__main__":
     main()
-

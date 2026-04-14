@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <cstring>
 
 namespace rtp_llm {
@@ -21,6 +22,10 @@ grpc::Status DecodeRpcServerNew::init(const EngineInitParams&                   
 grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                     const GenerateInputPB*                 request,
                                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
+    RTP_LLM_PROFILE_FUNCTION();
+    bool enable_timeline = applyTimelineGate(std::to_string(request->request_id()),
+                          request->generate_config().gen_timeline(),
+                          request->generate_config().profile_step());
     DecodeGenerateContextNew decode_context(server_context, request, response_writer, metrics_reporter_, meta_);
 
     RTP_LLM_LOG_DEBUG("request [%s] start generate", decode_context.request_key.c_str());
@@ -31,6 +36,9 @@ grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*        
                             decode_context.request_key.c_str(),
                             decode_context.error_info.ToString().c_str());
         return serializeErrorMsg(decode_context.request_key, decode_context.error_info);
+    }
+    if (enable_timeline) {
+        decode_context.generate_input->generate_config->gen_timeline = true;
     }
 
     decode_context.error_info = loadCacheFromPrefill(decode_context);
@@ -48,6 +56,7 @@ grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*        
 }
 
 ErrorInfo DecodeRpcServerNew::loadCacheFromPrefill(DecodeGenerateContextNew& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to load cache from prefill", decode_context.request_key.c_str());
 
     makeRemoteGenerateRequest(decode_context);
@@ -71,6 +80,7 @@ ErrorInfo DecodeRpcServerNew::loadCacheFromPrefill(DecodeGenerateContextNew& dec
 }
 
 void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto& request = decode_context.remote_generate_request;
 
     GenerateInputPB* new_request = new GenerateInputPB(*decode_context.request);
@@ -97,6 +107,7 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
 }
 
 ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to call prefill", decode_context.request_key.c_str());
 
     auto                        role_addrs = QueryConverter::getRoleAddrs(&decode_context.request->generate_config());
@@ -111,11 +122,10 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
     }
 
     // If no host specified in request, check if there's a master role
-    char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
+    char* decode_cm2_config_env    = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
     char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-    bool  has_master_role =
-        (decode_cm2_config_env != nullptr
-            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
+    bool  has_master_role          = (decode_cm2_config_env != nullptr
+                            || (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0));
 
     // For PD inversion where request directly reaches decode, we need to select prefill machines
     if (!host && has_master_role) {
@@ -210,6 +220,7 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
 }
 
 grpc::Status DecodeRpcServerNew::localGenerate(DecodeGenerateContextNew& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto generate_stream = decode_context.getStream();
     auto error_info      = writeAppendFirstToken(decode_context);
     if (!error_info.ok()) {
@@ -231,6 +242,7 @@ grpc::Status DecodeRpcServerNew::localGenerate(DecodeGenerateContextNew& decode_
 }
 
 ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& decode_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     if (decode_context.server_context->IsCancelled()) {
         RTP_LLM_LOG_WARNING("request [%s] is cancelled", decode_context.request_key.c_str());
         return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
@@ -279,15 +291,20 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     generate_stream->step();
 
     // append first token to generate stream
-    auto new_tokens     = engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                                {(size_t)generate_stream->nextBatchSize(), (size_t)1},
-                                                                rtp_llm::AllocationType::HOST},
-                                                               {});
-    auto data           = new_tokens->data<int32_t>();
-    auto first_token_id = response.first_generate_token_id();
-    *data               = first_token_id;
+    auto new_tokens = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
+
+    new_tokens.data_ptr<int32_t>()[0] = response.first_generate_token_id();
     generate_stream->incLastOutputPos();
-    generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
+    generate_stream->update({new_tokens,
+                             1,
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor()});
     if (propose_maga_init_params_) {
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
         generate_stream->setSpEditRun(false);

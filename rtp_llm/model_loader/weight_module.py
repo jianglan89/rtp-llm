@@ -306,6 +306,7 @@ class AtomicWeight(WeightModule):
     process_fun: Callable[[List[torch.Tensor]], torch.Tensor]
     data_type: Optional[torch.dtype] = None
     split_func = None
+    config = None
 
     """原子权重（不可分割的单个权重）"""
 
@@ -423,10 +424,17 @@ class AtomicWeight(WeightModule):
     def __split_tensor(
         self, split_func: Callable, tensor: torch.Tensor, load_config: LoadConfig
     ) -> torch.Tensor:
+        if self.name in [W.lm_head]:
+            tp = load_config.lm_head_tp_size
+            tp_rank = load_config.lm_head_tp_rank
+        else:
+            tp = load_config.tp_size
+            tp_rank = load_config.tp_rank
+
         return split_func(
             t=tensor,
-            tp=load_config.tp_size,
-            tp_rank=load_config.tp_rank,
+            tp=tp,
+            tp_rank=tp_rank,
             ep=load_config.ep_size,
             ep_rank=load_config.ep_rank,
             dp=load_config.dp_size,
@@ -437,7 +445,7 @@ class AtomicWeight(WeightModule):
             head_num=load_config.head_num,
             head_num_kv=load_config.head_num_kv,
             size_per_head=load_config.size_per_head,
-            use_stack_weight=load_config.use_stack_weight,
+            moe_pure_tp_mode=load_config.moe_pure_tp_mode,
             bits=load_config.bit,
         )
 

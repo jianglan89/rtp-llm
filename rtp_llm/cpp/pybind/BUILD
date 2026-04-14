@@ -1,5 +1,10 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps", "select_py_bindings")
+load(
+    "//bazel:arch_select.bzl",
+    "no_block_copy_link_deps",
+    "select_py_bindings",
+    "torch_deps",
+)
 
 package(default_visibility = ["//:__subpackages__"])
 
@@ -45,15 +50,23 @@ cc_library(
     name = "th_compute_lib",
     srcs = [
         "ComputeInit.cc",
-    ],
+    ] + select({
+        "@//:using_cuda12": ["//rtp_llm/cpp/core:exec_ops_srcs"],
+        "//conditions:default": [],
+    }),
     hdrs = [],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/devices:devices_base",
-        "//rtp_llm/cpp/devices:device_utils",
+        "//rtp_llm/cpp/core:devices_base",
+        "//rtp_llm/cpp/utils:debug_utils",
+        "//rtp_llm/cpp/utils:device_perf_wrapper",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
-    ] + torch_deps() + select_py_bindings(),
+    ] + torch_deps() + select_py_bindings() + select({
+        "@//:using_cuda12": ["//rtp_llm/cpp/cuda/ops:gpu_base"],
+        "@//:using_rocm": ["//rtp_llm/cpp/core:exec_ctx_rocm"],
+        "//conditions:default": [],
+    }) + no_block_copy_link_deps(),
     copts = copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],
@@ -78,8 +91,24 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/utils:signal_utils",
         "//:rtp_compute_ops",
-    ] + torch_deps(),
+    ] + torch_deps() + select({
+        "//:using_cuda": [
+            "//rtp_llm/cpp/cuda/ops:gpu_base",
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        ],
+        # libth_transformer.so does NOT contain its own copy of
+        # globalRuntime() / globalPgState().  Those symbols are
+        # resolved at load-time from librtp_compute_ops.so.
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/core:exec_ctx_ops",
+            "//rtp_llm/cpp/core:exec_ops_hdr",
+            "//rtp_llm/cpp/core:distributed_comm_hdr",
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        ],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],

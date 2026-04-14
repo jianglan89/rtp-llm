@@ -62,6 +62,17 @@ public:
     }
 
     ::grpc::Status
+    StartProfile(::grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response) override {
+        return local_server_->StartProfile(context, request, response);
+    }
+
+    ::grpc::Status StartProfileInternal(::grpc::ServerContext*               context,
+                                        const StartProfileInternalRequestPB* request,
+                                        EmptyPB*                             response) override {
+        return local_server_->StartProfileInternal(context, request, response);
+    }
+
+    ::grpc::Status
     CheckHealth(::grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) override {
         return local_server_->CheckHealth(context, request, response);
     }
@@ -90,16 +101,6 @@ public:
 
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version) {
         return local_server_->getEngineScheduleInfo(latest_finised_version);
-    }
-
-    void addLora(const std::string&                        adapter_name,
-                 const rtp_llm::lora::loraLayerWeightsMap& lora_a_weights,
-                 const rtp_llm::lora::loraLayerWeightsMap& lora_b_weights) {
-        local_server_->addLora(adapter_name, lora_a_weights, lora_b_weights);
-    }
-
-    void removeLora(const std::string& adapter_name) {
-        local_server_->removeLora(adapter_name);
     }
 
     std::shared_ptr<EngineBase> getEngine() const {

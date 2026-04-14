@@ -7,7 +7,7 @@ py_test(
         "//rtp_llm:ops",
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu': 'A10'},
+    exec_properties = {'gpu': 'H20'},
     tags = ["frontend"],
 )
 
@@ -26,8 +26,6 @@ py_test(
         "MODEL_TYPE": "qwen_2",
         "ACT_TYPE": "bf16",
         "CONCURRENCY_LIMIT": "128",
-        "GPU_COUNT": "0",
     },
-    exec_properties = {'gpu': 'NO_GPU', "gpu_count": "0"},
     tags = ["frontend"],
 )

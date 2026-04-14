@@ -1,12 +1,14 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
+
+cc_test = cc_test_wrapper
 
 test_copts = [
     "-fno-access-control",
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/cpp/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/utils:core_utils",
@@ -28,9 +30,10 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/core:exec_ops_test_lib",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -45,5 +48,5 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )

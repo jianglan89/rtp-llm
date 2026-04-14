@@ -4,12 +4,14 @@ import torch
 import torch.nn.functional as F
 from aiter import layernorm2d_fwd as layernorm2d_fwd
 from aiter import rmsnorm2d_fwd as rms_norm
+from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
 from torch import nn
 
 from rtp_llm.models_py.modules.base.common.norm import (
     BaseAddBiasResLayerNorm,
     BaseLayerNorm,
     BaseNorm,
+    BaseResNorm,
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -34,6 +36,27 @@ class RMSNorm(BaseNorm):
         return rms_norm(hidden_states, self.weight.data, self.variance_epsilon)
 
 
+class RMSResNorm(BaseResNorm):
+    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+        super().__init__(weight, eps)
+
+    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+        output = torch.empty_like(hidden_states)
+        residual_out = torch.empty_like(hidden_states)
+        fused_add_rmsnorm(
+            output,
+            hidden_states,
+            residual,
+            residual_out,
+            self.weight.data,
+            self.variance_epsilon,
+            0, #use_model_sensitive_rmsnorm
+        )
+        # NOTE: copy_ may introduce extra overhead.
+        residual.copy_(residual_out)
+        return output
+
+
 class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
     def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, beta, eps)
@@ -44,13 +67,22 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
         residual: torch.Tensor,
         bias: torch.Tensor,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if bias.numel() == 0:
+            bias = torch.zeros(
+                hidden_states.shape[-1],
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
+
         if hidden_states.shape[0] > 32 and hidden_states.shape[1] <= 768:
+            hidden_states = hidden_states + residual
+            x_bias = bias if bias.numel() > 0 else None
             return layernorm2d_fwd(
                 hidden_states,
                 self.weight.data,
-                bias,
+                self.beta,
                 self.variance_epsilon,
-                x_bias=None,
+                x_bias=x_bias,
             )
         else:
             rtp_llm_ops.fused_add_layernorm(

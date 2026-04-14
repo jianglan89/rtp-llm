@@ -2,7 +2,6 @@
 
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <mutex>
@@ -28,12 +27,12 @@ public:
     BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
-                         rtp_llm::DeviceBase*                   device) {
+                         int                                    dp_rank = 0) {
         cache_manager_    = cache_manager;
-        device_           = device;
         metrics_reporter_ = metrics_reporter;
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
         scheduler_type_   = SchedulerType::kBatchDecode;
+        dp_rank_          = dp_rank;
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -87,20 +86,23 @@ public:
             // reset start time，to get more accurate avg token time
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
             // only set gen_timeline = True for first rank
-            if (device_->getDeviceProperties().dp_rank != 0) {
+            if (dp_rank_ != 0) {
                 (*it)->setGenTimeline(false);
             }
             auto result = (*it)->initKVBlock(reserve_step);
             if (!result.ok()) {
                 (*it)->setStop(ErrorCode::MALLOC_FAILED,
                                "BatchDecodeScheduler::initRunningStreams: initKVBlock failed");
+                continue;
             }
-        }
-        // incr kvcache block to decode
-        if (scheduler_type_ == SchedulerType::kBatchDecode) {
-            for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
-                auto stream = *it;
-                stream->setIsContextStream(false);
+            if (scheduler_type_ == SchedulerType::kBatchDecode) {
+                (*it)->setIsContextStream(false);
+                // for linear attn, incrKVBlock to clear unused linear block
+                result = (*it)->incrKVBlock(reserve_step);
+                if (!result.ok()) {
+                    (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "decode incrKVBlock failed");
+                    RTP_LLM_LOG_WARNING("stream [%ld] decode incr block failed", (*it)->streamId());
+                }
             }
         }
     }
@@ -168,8 +170,8 @@ private:
 
     std::shared_ptr<KVCacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;
-    rtp_llm::DeviceBase*            device_;
     SchedulerType                   scheduler_type_;
+    int                             dp_rank_ = 0;
 };
 
 }  // namespace rtp_llm

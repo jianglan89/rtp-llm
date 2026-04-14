@@ -4,8 +4,8 @@
 #include <torch/torch.h>
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
-#include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
-#include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/models_py/bindings/common/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/cpp/core/OpData.h"
 
 namespace rtp_llm {
 
@@ -15,6 +15,7 @@ struct TRTAttn: public ParamsBase {
     torch::Tensor kv_cache_offset_h;
 
     torch::Tensor padding_offset;
+    torch::Tensor cp_position_ids;
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor input_lengths;

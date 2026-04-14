@@ -11,7 +11,7 @@ from rtp_llm.config.quant_config import (
     QuantizationConfig,
     init_quant_config,
 )
-from rtp_llm.ops import KVCacheConfig, KvCacheDataType
+from rtp_llm.ops import DataType, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
@@ -39,6 +39,17 @@ def kv_cache_dtype_to_torch_dtype(
         return data_type.to_torch_dtype()
 
 
+def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
+    ssm_state_dtype = ssm_state_dtype.lower()
+    if ssm_state_dtype == "bf16":
+        return DataType.TYPE_BF16
+    if ssm_state_dtype == "fp16":
+        return DataType.TYPE_FP16
+    if ssm_state_dtype == "fp32":
+        return DataType.TYPE_FP32
+    raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
+
+
 class VitParameters:
     """Vit parameters for multimodal models."""
 
@@ -57,6 +68,7 @@ class ModelConfig(CppModelConfig):
     _python_fields = {
         "is_mtp",
         "normalize_lm_head_weight",
+        "enable_fp32_lm_head",
         "has_lm_head_bias",
         "tie_word_embeddings",
         "quantization",
@@ -71,6 +83,8 @@ class ModelConfig(CppModelConfig):
         "generate_env_config",
         "render_config",
         "phy2log_path",
+        "lora_infos",
+        "headwise_config",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -86,7 +100,6 @@ class ModelConfig(CppModelConfig):
         "eplb_config",
         "ckpt_path",
         "tokenizer_path",
-        "lora_infos",
         "position_ids_style",
         "pre_seq_len",
         "use_kvcache",
@@ -120,6 +133,7 @@ class ModelConfig(CppModelConfig):
         "use_norm_attn_out_residual",
         "input_vocab_size",
         "type_vocab_size",
+        "gen_num_per_cycle",
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",
@@ -476,6 +490,7 @@ class ModelConfig(CppModelConfig):
         # Additional Python-only fields
         self.is_mtp: bool = False
         self.normalize_lm_head_weight: bool = False
+        self.enable_fp32_lm_head: bool = True
         self.has_lm_head_bias: bool = False
         self.tie_word_embeddings: bool = False
         # Model loading related fields
@@ -493,6 +508,7 @@ class ModelConfig(CppModelConfig):
         self.model_name: str = (
             ""  # Model name (also set to engine_config.runtime_config.model_name)
         )
+        self.lora_infos: Dict[str, str] = {}  # Python-only (C++ lora code removed)
 
         # Model architecture fields
         self.inter_size: int = 0  # FFN intermediate size (for regular FFN layers)
@@ -810,6 +826,15 @@ def build_model_config(
         kv_cache_config=kv_cache_config, act_type=model_args.act_type
     )
     model_config.attn_config.tokens_per_block = kv_cache_config.seq_size_per_block
+    model_config.attn_config.kernel_tokens_per_block = (
+        kv_cache_config.kernel_seq_size_per_block
+        if kv_cache_config.kernel_seq_size_per_block > 0
+        else kv_cache_config.seq_size_per_block
+    )
+    model_config.linear_attention_config.ssm_state_dtype = (
+        ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)
+    )
+    model_config.linear_attention_config.conv_state_dtype = model_config.data_type
 
     model_config.use_kvcache = model_config.task_type == TaskType.LANGUAGE_MODEL
     logging.info(
@@ -829,6 +854,9 @@ def build_model_config(
     if hack_layer_num:
         logging.info(f"hack layernum to {hack_layer_num}")
         model_config.num_layers = hack_layer_num
+
+    if model_args.enable_fp32_lm_head is not None:
+        model_config.enable_fp32_lm_head = model_args.enable_fp32_lm_head
 
     # Apply model override args
     if model_args.json_model_override_args:

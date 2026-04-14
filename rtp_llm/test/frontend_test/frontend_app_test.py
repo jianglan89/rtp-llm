@@ -7,6 +7,8 @@ import traceback
 import unittest
 
 import requests
+from rtp_llm.ops import RoleType
+from rtp_llm.start_frontend_server import start_frontend_server
 
 
 class FrontendAppTest(unittest.TestCase):
@@ -20,7 +22,7 @@ class FrontendAppTest(unittest.TestCase):
         # Setup args and configure server (same as start_server.py main())
         # Keep only script name
         py_env_configs = setup_args()
-
+        py_env_configs.role_config.role_type = RoleType.FRONTEND
         # Override with test-specific settings
         py_env_configs.server_config.start_port = 36000
         py_env_configs.server_config.frontend_server_count = 1
@@ -38,9 +40,7 @@ class FrontendAppTest(unittest.TestCase):
             py_env_configs.concurrency_config, dp_size=1
         )
 
-        # Start frontend server with same parameters as start_server.py
-        from rtp_llm.start_frontend_server import start_frontend_server
-
+        # Start frontend server with same parameters as start_server.py (config already has rank_id=0)
         # Use thread to run start_frontend_server since app.start() blocks (server.run() is blocking)
         start_error = [None]
         error_traceback = [None]
@@ -55,7 +55,7 @@ class FrontendAppTest(unittest.TestCase):
         frontend_thread = threading.Thread(target=run_start, daemon=True)
         frontend_thread.start()
 
-        health_check_url = f"http://localhost:{py_env_configs.server_config.start_port}/frontend_health"
+        health_check_url = f"http://localhost:{py_env_configs.server_config.server_port}/frontend_health"
 
         # Wait for initialization and check for errors periodically
         max_wait_time = 30

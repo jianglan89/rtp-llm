@@ -5,13 +5,13 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FlashInferDecodeOp,
     FlashInferPrefillOp,
     FusedRopeKVCacheDecodeOp,
     FusedRopeKVCachePrefillOpQKVOut,
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
 )
 
@@ -19,7 +19,10 @@ from rtp_llm.ops.compute_ops import (
 class FlashInferPrefillImpl(FMHAImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
@@ -37,7 +40,9 @@ class FlashInferPrefillImpl(FMHAImplBase):
 
     @classmethod
     def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        cls,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
     ) -> bool:
         # Check MLA is not enabled
         if attn_configs.use_mla:
@@ -49,7 +54,8 @@ class FlashInferPrefillImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -69,12 +75,18 @@ class FlashInferPrefillImpl(FMHAImplBase):
 class FlashInferDecodeImpl(FMHAImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         # Create implementations
-        self.fmha_impl = FlashInferDecodeOp(attn_configs)
+        enable_cuda_graph = getattr(attn_inputs, "is_cuda_graph", False)
+        self.fmha_impl = FlashInferDecodeOp(
+            attn_configs, enable_cuda_graph=enable_cuda_graph
+        )
         self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
         self.attn_configs = attn_configs
 
@@ -100,7 +112,8 @@ class FlashInferDecodeImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -121,7 +134,7 @@ class FlashInferDecodeImpl(FMHAImplBase):
         self.fmha_params.fill_params(
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id_host,
             batch_size,
             self.seq_size_per_block,
         )

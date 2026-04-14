@@ -1,7 +1,8 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew.h"
 #include "autil/StringUtil.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -15,16 +16,18 @@ grpc::Status PrefillRpcServerNew::init(const EngineInitParams&                  
 grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*              context,
                                                     const RemoteGenerateRequestPBNew* request,
                                                     RemoteGenerateResponsePBNew*      response) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto             modified_request = const_cast<RemoteGenerateRequestPBNew*>(request);
     GenerateInputPB* mutable_input    = modified_request->mutable_input();
 
     // reset request_id in prefill
     auto request_id = loading_cache_requests_.fetch_add(1, std::memory_order_relaxed);
     mutable_input->set_request_id(request_id);
-
-    // ignore inter_request_id in prefill
-    auto modified_config = mutable_input->mutable_generate_config();
-    modified_config->set_inter_request_id(-1);
+    if (applyTimelineGate(std::to_string(request_id),
+                          mutable_input->generate_config().gen_timeline(),
+                          mutable_input->generate_config().profile_step())) {
+        mutable_input->mutable_generate_config()->set_gen_timeline(true);
+    }
 
     PrefillGenerateContextNew prefill_context(&resource_, context, request, response, metrics_reporter_, meta_);
     RTP_LLM_LOG_INFO("request [%s] RemoteGenerateNew", prefill_context.request_key.c_str());
@@ -71,7 +74,7 @@ grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*        
 
     // TODO: notify remote store for hidden state
     // if (engine_->isMTPEagle() &&
-    //        engine_->getDevice()->getDeviceProperties().tp_rank == 0 &&
+    //        engine_->getExecCtx()->getExecProperties().tp_rank == 0 &&
     //        !request->mtp_hidden_states_key.empty()) {
     //}
 
@@ -131,6 +134,7 @@ bool PrefillRpcServerNew::validRequest(PrefillGenerateContextNew& prefill_contex
 }
 
 ErrorInfo PrefillRpcServerNew::notifyStoreCacheForAllRank(PrefillGenerateContextNew& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     for (int i = 0; i < resource_.workers.size(); ++i) {
         auto error_info = notifyStoreCache(prefill_context, i);
         if (!error_info.ok()) {
@@ -145,6 +149,7 @@ ErrorInfo PrefillRpcServerNew::notifyStoreCacheForAllRank(PrefillGenerateContext
 }
 
 ErrorInfo PrefillRpcServerNew::notifyStoreCache(PrefillGenerateContextNew& prefill_context, int index) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto& worker         = resource_.grpc_workers[index];
     auto  connect_status = resource_.rpc_pool.getConnection(worker);
     if (!connect_status.ok()) {
@@ -241,6 +246,7 @@ void PrefillRpcServerNew::constructRemoteLoadRequest(PrefillGenerateContextNew& 
 }
 
 ErrorInfo PrefillRpcServerNew::generateFirstToken(PrefillGenerateContextNew& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto stream = prefill_context.getStream();
     engine_->enqueue(stream);
     while (!stream->finished() || stream->hasOutput()) {
@@ -271,6 +277,7 @@ ErrorInfo PrefillRpcServerNew::generateFirstToken(PrefillGenerateContextNew& pre
 }
 
 ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateContextNew& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     int  finished_count = 0;
     bool all_success    = true;
 
@@ -356,6 +363,7 @@ ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateConte
 grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server_context,
                                               const RemoteStoreRequestPB* request,
                                               RemoteStoreResponsePB*      response) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] remote store", request->request_key().c_str());
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
@@ -471,6 +479,7 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
 grpc::Status PrefillRpcServerNew::RemoteFinish(grpc::ServerContext*         context,
                                                const RemoteFinishRequestPB* request,
                                                EmptyPB*                     response) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto request_id = request->request_id();
     resource_.cache_store->markRequestEnd(std::to_string(request_id));
     return grpc::Status::OK;

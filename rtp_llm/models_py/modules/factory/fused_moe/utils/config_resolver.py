@@ -9,7 +9,7 @@ import torch
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops.compute_ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 from rtp_llm.utils.util import to_torch_dtype
 
 
@@ -23,7 +23,7 @@ class MoeConfigResolver:
         Returns:
             Device type
         """
-        return get_device().get_device_type()
+        return get_exec_ctx().get_device_type()
 
     @staticmethod
     def has_quantization(config: MoEConfigAdapter) -> bool:
@@ -73,7 +73,7 @@ class MoeConfigResolver:
         Returns:
             Whether EP is enabled
         """
-        return config.parallelism_config.ep_size > 1
+        return config.ep_size > 1
 
     @staticmethod
     def use_low_latency(config: MoEConfigAdapter) -> bool:
@@ -97,7 +97,7 @@ class MoeConfigResolver:
         Returns:
             Whether single GPU
         """
-        return config.parallelism_config.ep_size == 1
+        return config.ep_size == 1
 
     @staticmethod
     def is_tp_equal_ep(config: MoEConfigAdapter) -> bool:
@@ -109,7 +109,26 @@ class MoeConfigResolver:
         Returns:
             Whether TP size equals EP size
         """
-        return config.parallelism_config.tp_size == config.parallelism_config.ep_size
+        # in cp mode, tp_size is set to 1
+        return config.tp_size == config.ep_size
+
+    @staticmethod
+    def is_pure_tp_mode(config: MoEConfigAdapter) -> bool:
+        """Check if pure TP mode is applicable.
+
+        Pure TP mode requires ep_size == 1 and dp_size == 1, meaning each
+        rank holds all experts without EP/DP splitting. This covers both
+        single-GPU (tp=1) and multi-GPU pure-TP (tp>1) scenarios. This
+        aligns with the weight-splitting condition (moe_pure_tp_mode) in
+        model_weight_info.py.
+
+        Args:
+            config: MOE configuration adapter
+
+        Returns:
+            Whether pure TP mode can be used
+        """
+        return config.ep_size == 1 and config.dp_size == 1 and config.tp_size >= 1
 
     @staticmethod
     def use_all_gather(config: MoEConfigAdapter) -> bool:

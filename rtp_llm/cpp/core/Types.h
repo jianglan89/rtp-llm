@@ -18,6 +18,16 @@ enum class AllocationType {
     DEVICE = 1,
 };
 
+enum QScheme : size_t {
+    NoQuantize = 0,
+    Qint8WeightOnly,
+    Qint8PerToken,
+    Qint8PerTensor,
+    Qfp8PerTensor,
+    Qfp8PerTokenBlock,
+    Qfp8PerToken
+};
+
 enum DataType : std::uint8_t {
     TYPE_INVALID   = 0,
     TYPE_BOOL      = 1,
@@ -41,6 +51,7 @@ enum DataType : std::uint8_t {
     TYPE_INT4X2    = 19,
     TYPE_QINT4X2   = 20,
     TYPE_QFP8_E4M3 = 21,
+    TYPE_FP8_E8M0  = 22
 };
 
 inline DataType getDataType(const std::string& type_str) {

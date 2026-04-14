@@ -10,8 +10,14 @@ py_library(
 # flashinfer-python is only available for CUDA12
 flashinfer = ["flashinfer-python"]
 deep = ["deep_gemm", "deep_ep"]
+flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
+rtp_kernel = ["rtp-kernel"]
+flashattn = ["flash_attn","flash-attn-3"]
 requirement(flashinfer)
 requirement(deep)
+requirement(flashmla)
+requirement(rtp_kernel)
+requirement(flashattn)
 
 
 filegroup(
@@ -32,12 +38,31 @@ py_library(
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         "@//:using_cuda12": flashinfer + deep,
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/modules/base/rocm:rocm_base",
+            "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": flashmla,
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": rtp_kernel,
+        "@//:using_cuda12_arm": rtp_kernel,
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": flashattn,
+        "@//:using_cuda12_arm": flashattn,
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
 )
+
+# Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
+exports_files(["modules/factory/sitecustomize.py"])
 
 py_library(
     name = "modules_cuda",

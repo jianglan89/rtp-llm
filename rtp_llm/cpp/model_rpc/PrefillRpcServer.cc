@@ -1,9 +1,10 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <cstring>
 #include <memory>
 #include <unistd.h>
@@ -106,8 +107,13 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 }
 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    auto input = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    if (applyTimelineGate(
+            prefill_context.request_key, input->generate_config->gen_timeline, input->generate_config->profile_step)) {
+        input->generate_config->gen_timeline = true;
+    }
     input->generate_config->pd_separation = true;
     if (engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = false;
@@ -164,6 +170,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
 }
 
 void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto& input = prefill_context.generate_input;
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto result = mm_processor_->updateMultimodalFeatures(input);
@@ -172,13 +179,15 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         auto mutable_request = const_cast<GenerateInputPB*>(prefill_context.rpc_context.request);
         mutable_request->clear_token_ids();
         // TODO(xinfei.sxf) optimize copy
-        for (size_t i = 0; i < input->input_ids->size(); i++) {
-            mutable_request->add_token_ids(*input->input_ids->dataWithOffset<int32_t>(i));
+        auto* ids_ptr = input->input_ids.data_ptr<int32_t>();
+        for (size_t i = 0; i < input->input_ids.numel(); i++) {
+            mutable_request->add_token_ids(ids_ptr[i]);
         }
     }
 }
 
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
     prefill_context.client_context.reset(new ClientContext());
     auto request_timeout_ms = prefill_context.request_timeout_ms;
@@ -194,11 +203,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     GenerateRequestPB alloc_request;
     alloc_request.set_stage(RemoteStage::ALLOCATE);
     alloc_request.set_client_id(process_id_);
-    // alloc_request.set_request_id(prefill_context.request_id);
-    auto inter_request_id = prefill_context.generate_input->generate_config->inter_request_id;
-    auto real_request_id  = inter_request_id != -1 ? inter_request_id : prefill_context.request_id;
-    RTP_LLM_LOG_DEBUG("inter_request_id is %d, real_request_id is %d", inter_request_id, real_request_id);
-    alloc_request.set_request_id(real_request_id);
+    alloc_request.set_request_id(prefill_context.request_id);
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
     alloc_request.set_allocated_input(new_request);
@@ -215,9 +220,8 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
 }
 
 void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(),
-                                              prefill_context.generate_input->generate_config->adapter_name);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.setStream(stream);
@@ -225,6 +229,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 }
 
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     if (prefill_context.error_info.hasError()) {
@@ -241,6 +246,7 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
 }
 
 void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to poll local output", prefill_context.request_id);
     auto first_status = pollStreamOutput(prefill_context.server_context,
                                          prefill_context.request_key,
@@ -259,6 +265,7 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
 }
 
 void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     GenerateOutputsPB load_response;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Read(&load_response), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
@@ -270,6 +277,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
 }
 
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote generate", prefill_context.request_id);
     std::shared_ptr<GenerateStream> stream = prefill_context.getStream();
     RTP_LLM_LOG_DEBUG("remote generate stream[%ld]: %s", stream->streamId(), stream->debugString().c_str());
@@ -280,11 +288,11 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
-    if (stream->getContextPositionIds()) {
-        auto context_position_ids = stream->getContextPositionIds();
+    auto context_position_ids = stream->getContextPositionIds();
+    if (context_position_ids.defined()) {
         generate_request.mutable_position_ids()->CopyFrom(
-            {context_position_ids->data<int32_t>(),
-             context_position_ids->data<int32_t>() + context_position_ids->size()});
+            {context_position_ids.data_ptr<int32_t>(),
+             context_position_ids.data_ptr<int32_t>() + context_position_ids.numel()});
     }
     if (engine_->isMTPEagle()) {
         RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 0,
@@ -296,21 +304,18 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (sp_output_buffer) {
-        if (sp_output_buffer->all_probs->where() == rtp_llm::MemoryType::MEMORY_GPU) {
-            sp_output_buffer->all_probs =
-                engine_->getDevice()->clone({*sp_output_buffer->all_probs, rtp_llm::AllocationType::HOST});
-        }
-        if (!sp_output_buffer->hidden_states) {
+        auto all_probs_cpu =
+            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        torch::Tensor hidden_states_cpu;
+        if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important
-            sp_output_buffer->hidden_states = engine_->getDevice()->allocateBuffer(
-                {rtp_llm::DataType::TYPE_FP16, {0}, rtp_llm::AllocationType::HOST});
+            hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+        } else {
+            hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
+                                                                            sp_output_buffer->hidden_states;
         }
-        if (sp_output_buffer->hidden_states->where() == rtp_llm::MemoryType::MEMORY_GPU) {
-            sp_output_buffer->hidden_states =
-                engine_->getDevice()->clone({*sp_output_buffer->hidden_states, rtp_llm::AllocationType::HOST});
-        }
-        QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), sp_output_buffer->all_probs.get());
-        QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), sp_output_buffer->hidden_states.get());
+        QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
+        QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
     }
 
     generate_request.set_stage(RemoteStage::GENERATE);
@@ -320,6 +325,7 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
 }
 
 void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to poll remote output", prefill_context.request_id);
     auto&             request_id = prefill_context.request_id;
     GenerateOutputsPB response;
@@ -394,6 +400,7 @@ grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& p
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
     auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
                          && request->generate_config().variable_num_beams().size() == 0
@@ -457,6 +464,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
 
 grpc::Status
 PrefillRpcServer::RemoteFinish(grpc::ServerContext* ontext, const RemoteFinishRequestPB* request, EmptyPB* response) {
+    RTP_LLM_PROFILE_FUNCTION();
     auto request_id = request->request_id();
     resource_.cache_store->markRequestEnd(std::to_string(request_id));
     return grpc::Status::OK;

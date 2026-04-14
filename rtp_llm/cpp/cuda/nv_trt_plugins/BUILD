@@ -1,5 +1,7 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
+
+cc_test = cc_test_wrapper
 
 
 cc_library(
@@ -26,7 +28,7 @@ cc_library(
         "//rtp_llm/cpp/cuda/cutlass:cutlass_interface",
         "//rtp_llm/cpp/cuda:trt_utils",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/kernels:kernels_cu",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
         "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda/cutlass:cutlass_headers",
         "//rtp_llm/cpp/model_utils:model_utils",
@@ -47,12 +49,11 @@ cc_test(
     copts = copts(),
     deps = [
         "@com_google_googletest//:gtest",
-        "//rtp_llm/cpp/core:buffer_torch",
-        "//rtp_llm/cpp/devices/testing:device_test_utils",
-        "//rtp_llm/cpp/devices/cuda_impl:gpu_base",
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/cpp/cuda/ops:gpu_base",
+        "//rtp_llm/cpp/cuda/ops:cuda_impl",
         ":trt_plugins",
     ],
     tags = ["manual"],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )

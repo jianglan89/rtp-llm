@@ -9,11 +9,12 @@ import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
-    AttnImplFactory,
     CausalAttention,
+    DenseMLP,
     Embedding,
     FMHAImplBase,
     LinearFactory,
@@ -35,6 +36,8 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
+from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
     HybridAttentionType,
@@ -42,29 +45,13 @@ from rtp_llm.ops import (
     ParallelismConfig,
 )
 from rtp_llm.ops.compute_ops import (
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
-
-
-def _is_target_verify(attention_inputs: PyAttentionInputs) -> bool:
-    """Check if the current forward pass is in target verify mode."""
-    # current impl will judge prefill with prefix as target verify, which cause problem is causal_conv1d_update, which needs more block id
-    # so disable it temp, we should mark it in structure
-    return False
-    return (
-        attention_inputs.input_lengths is not None
-        and attention_inputs.prefix_lengths is not None
-        and attention_inputs.prefix_lengths.size(0) > 0
-        and torch.all(
-            attention_inputs.input_lengths == attention_inputs.input_lengths[0]
-        ).item()
-        and torch.max(attention_inputs.input_lengths).item() < 10
-        and torch.min(attention_inputs.prefix_lengths).item() > 0
-    )
+from rtp_llm.utils.util import to_torch_dtype
 
 
 class Qwen3NextMetadata(object):
@@ -115,6 +102,21 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
             + self.head_v_dim * self.local_num_v_heads
         )
         self.conv_state_size: int = (self.linear_conv_kernel_dim - 1) * self.qkv_size
+        self.ssm_state_dtype: torch.dtype = to_torch_dtype(
+            linear_attn_config.ssm_state_dtype
+        )
+        self.conv_state_dtype: torch.dtype = to_torch_dtype(
+            linear_attn_config.conv_state_dtype
+        )
+        self.linear_cache_converter = LinearCacheConverter(
+            local_num_v_heads=self.local_num_v_heads,
+            head_v_dim=self.head_v_dim,
+            head_k_dim=self.head_k_dim,
+            ssm_state_dtype=self.ssm_state_dtype,
+            linear_conv_kernel_dim=self.linear_conv_kernel_dim,
+            qkv_size=self.qkv_size,
+            conv_state_dtype=self.conv_state_dtype,
+        )
         # weights
         self.conv_weights = weights[W.linear_attn_conv1d_w].squeeze(1)
         self.dt_bias = weights[W.linear_attn_dt_b]
@@ -126,46 +128,17 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         b: torch.Tensor,
         a: torch.Tensor,
         attn_inputs: PyAttentionInputs,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         raise NotImplementedError
 
     def _get_conv_states(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
-        _, block_size = kv_cache_tensor.view(kv_cache_tensor.shape[0], -1).shape
-        assert (
-            block_size >= self.ssm_state_size + self.conv_state_size
-        ), "block_size is too small, please check seq_size_per_block"
-        conv_states = torch.as_strided(
-            kv_cache_tensor,
-            (kv_cache_tensor.shape[0], self.linear_conv_kernel_dim - 1, self.qkv_size),
-            (kv_cache_tensor.stride()[0], self.qkv_size, 1),
-            storage_offset=self.ssm_state_size + kv_cache_tensor.storage_offset(),
-        )
+        conv_states = self.linear_cache_converter.get_conv_state_tensor(kv_cache_tensor)
         return conv_states
 
     def _get_ssm_states(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
-        # maybe should support smsm cahe with difference dtype(fp32/bf16/fp16)
-        _, block_size = kv_cache_tensor.view(kv_cache_tensor.shape[0], -1).shape
-        assert (
-            block_size >= self.ssm_state_size + self.conv_state_size
-        ), "block_size is too small, please check seq_size_per_block"
-        ssm_states = torch.as_strided(
-            kv_cache_tensor,
-            (
-                kv_cache_tensor.shape[0],
-                self.local_num_v_heads,
-                self.head_v_dim,
-                self.head_k_dim,
-            ),
-            (
-                kv_cache_tensor.stride()[0],
-                self.head_k_dim * self.head_v_dim,
-                self.head_k_dim,
-                1,
-            ),
-            storage_offset=kv_cache_tensor.storage_offset(),
-        )
+        ssm_states = self.linear_cache_converter.get_ssm_state_tensor(kv_cache_tensor)
         return ssm_states
 
 
@@ -201,7 +174,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             bias=None,
             conv_states=conv_states,
             query_start_loc=cu_seqlen_without_padding,
-            block_map=attn_inputs.kv_cache_block_id_device,
+            block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_d,
             metadata=metadata,
@@ -234,12 +207,12 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 self.head_v_dim,
                 self.head_k_dim,
                 device=mixed_qkv.device,
-                dtype=mixed_qkv.dtype,
+                dtype=self.ssm_state_dtype,
             )
 
             load_initial_state_from_block_map(
                 attn_inputs.prefix_lengths_d,
-                attn_inputs.kv_cache_block_id_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 initial_states,
                 seq_size_per_block,
@@ -270,10 +243,10 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         if ssm_states is not None:
             store_ssm_state_to_block_map(
                 h,
-                final_state.to(h.dtype),
+                final_state,
                 attn_inputs.prefix_lengths_d,
                 cu_seqlens_without_padding,
-                attn_inputs.kv_cache_block_id_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 seq_size_per_block,
                 chunk_size=64,
@@ -286,7 +259,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         b: torch.Tensor,
         a: torch.Tensor,
         attn_inputs: PyAttentionInputs,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         kv_cache_tensor: Optional[torch.Tensor] = None
@@ -341,7 +314,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             bias=None,
             activation="silu",
             cache_seqlens=None,
-            block_map=attn_inputs.kv_cache_block_id_device,
+            block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
         )
@@ -392,7 +365,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             scale=None,
             initial_state=ssm_states,
             inplace_final_state=True,
-            block_map=attn_inputs.kv_cache_block_id_device,
+            block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
             use_qk_l2norm_in_kernel=True,
@@ -408,7 +381,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         b: torch.Tensor,
         a: torch.Tensor,
         attn_inputs: PyAttentionInputs,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required for decode"
@@ -480,7 +453,7 @@ class Qwen3NextAttention(CausalAttention):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
@@ -564,13 +537,14 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         assert attention_inputs is not None, "attention_inputs is required"
         assert (
-            not attention_inputs.is_prefill
+            attention_inputs.is_target_verify
+            or not attention_inputs.is_prefill
             or attn_meta.get_prefill_conv1d_meta() is not None
         ), "prefill_conv1d_meta is required for prefill"
         projected_states_qkvz = self.in_proj_qkvz(hidden_states)
@@ -592,7 +566,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         # from [token * head, dim] -> [token, head * dim]
         attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
         attn_output = self.out_proj(attn_output)
-        if self.parallelism_config.tp_size > 1:
+        if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
         return attn_output
 
@@ -622,7 +596,9 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.quant_config,
             )
         else:
-            attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+            attn_configs = config.getAttentionConfigs(
+                parallelism_config.get_attn_tp_size()
+            )
             self.self_attn = Qwen3NextAttention(
                 attn_configs,
                 parallelism_config,
@@ -630,14 +606,20 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
             )
-        self.mlp = GenericMoeLayer(
-            config,
-            parallelism_config,
-            weights,
-            moe_config,
-            max_generate_batch_size,
-            enable_cuda_graph,
-        )
+
+        if config.moe_style == 2:
+            self.mlp = GenericMoeLayer(
+                config,
+                parallelism_config,
+                weights,
+                moe_config,
+                max_generate_batch_size,
+                enable_cuda_graph,
+            )
+        elif config.moe_style == 0:
+            self.mlp = DenseMLP(
+                config.activation_type, parallelism_config, weights, config.quant_config
+            )
 
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -650,7 +632,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache] = None,
+        kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
@@ -728,27 +710,26 @@ class Qwen3NextModel(GptModelBase):
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
-        if attention_inputs.is_prefill:
-            # cu_seqlen_without_padding = attention_inputs.cu_seqlens[
-            #     : attention_inputs.input_lengths.size(0) + 1
-            # ]
+        is_target_verify = attention_inputs.is_target_verify
+        if attention_inputs.is_prefill and not is_target_verify:
             cu_seqlen_without_padding = attention_inputs.cu_seqlens
             prefill_conv1d_meta = prepare_causal_conv1d_metadata(
                 query_start_loc=cu_seqlen_without_padding,
                 device=hidden_states.device,
             )
-        # hack temp
-        is_target_verify = _is_target_verify(attention_inputs)
-        if is_target_verify:
-            attention_inputs.sequence_lengths_plus_1_d = (
-                attention_inputs.prefix_lengths + 1
-            ).to(hidden_states.device)
+
         attn_meta = Qwen3NextMetadata(prefill_conv1d_meta, is_target_verify)
+
+        # qwen3_next model has only one full group (group 0): use fmha_impl from input param
+        # if there is a model with more than 1 full groups,
+        # we should prepare fmha_impl for each full group/ fix later
+
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(
-                inputs
-            )  # pyright: ignore[reportUnreachable]
+            fmha_impl = self.prepare_fmha_impl(inputs)
+
         for i, decoder_layer in enumerate(self.layers):
+            # Switch to correct block_map for this layer in hybrid attention mode
+            select_block_map_for_layer(attention_inputs, i)
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
@@ -756,5 +737,6 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
             )
+
         hidden_states = self.norm(hidden_states)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)

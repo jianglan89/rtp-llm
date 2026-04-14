@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
-
 class BatchKVCacheResource {
 public:
     BatchKVCacheResource() {}
@@ -22,9 +21,13 @@ public:
         batch_resource.resize(batch_size);
     }
 
-    void initGroups(int group_nums, int layer_num) {
+    void initGroups(int                                group_nums,
+                    int                                layer_num,
+                    const std::vector<int>&            layer_to_group_id          = {},
+                    size_t                             kernel_blocks_per_kv_block = 1,
+                    const std::vector<CacheGroupType>& group_types                = {}) {
         for (auto& batch : batch_resource) {
-            batch.initGroups(group_nums, layer_num);
+            batch.initGroups(group_nums, layer_num, layer_to_group_id, kernel_blocks_per_kv_block, group_types);
         }
     }
 
@@ -45,7 +48,18 @@ public:
     }
 
     int curBlocksNum() const {
-        return batch_resource.empty() ? 0 : batch_resource[0].blocksNum();
+        if (batch_resource.empty()) {
+            return 0;
+        }
+
+        auto& resource   = batch_resource[0];
+        int   group_nums = resource.groupNums();
+
+        int max_blocks_num = 0;
+        for (int i = 0; i < group_nums; i++) {
+            max_blocks_num = std::max(max_blocks_num, resource.blocksNum(i));
+        }
+        return max_blocks_num;
     }
 
     const BlockIndicesType& blocks(int batch_id, int group_id = 0) const {
@@ -53,9 +67,14 @@ public:
         return batch_resource[batch_id].blocks(group_id);
     }
 
-    BlockIndicesType& mutableBlocks(int batch_id, int group_id = 0) {
+    const BlockIndicesType& kernelBlocks(int batch_id, int group_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].blocks(group_id);
+        return batch_resource[batch_id].kernelBlocks(group_id);
+    }
+
+    BlockIds& mutableBlockIds(int batch_id, int group_id = 0) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        return batch_resource[batch_id].mutableBlockIds(group_id);
     }
 
     const GroupBlockIds& groupBlocks(int batch_id = 0) const {
@@ -109,14 +128,20 @@ public:
         batch_resource[batch_id].cacheKeys().push_back(key);
     }
 
-    void initBatchGroups(int batch_id, int group_nums, int layer_num) {
+    void initBatchGroups(int                                batch_id,
+                         int                                group_nums,
+                         int                                layer_num,
+                         const std::vector<int>&            layer_to_group_id          = {},
+                         size_t                             kernel_blocks_per_kv_block = 1,
+                         const std::vector<CacheGroupType>& group_types                = {}) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        batch_resource[batch_id].initGroups(group_nums, layer_num);
+        batch_resource[batch_id].initGroups(
+            group_nums, layer_num, layer_to_group_id, kernel_blocks_per_kv_block, group_types);
     }
 
     void setBatchBlocks(int batch_id, int group_id, const BlockIndicesType& blocks) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        batch_resource[batch_id].blocks(group_id) = blocks;
+        batch_resource[batch_id].mutableBlockIds(group_id).assign(blocks);
     }
 
     void setBatchCacheKeys(int batch_id, const CacheKeysType& keys) {
@@ -190,8 +215,12 @@ public:
         }
     }
 
+    void swapBlocks(int32_t batch_id, size_t group_id, size_t rhs, size_t lhs) {
+        batch_resource[batch_id].swapBlocks(group_id, rhs, lhs);
+    }
+
 private:
-    std::vector<KVCacheResource> batch_resource;
+    std::vector<KVCacheResource> batch_resource;  // [batch_size]
 };
 
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;

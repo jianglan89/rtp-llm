@@ -52,6 +52,8 @@ class Pipeline(object):
         ] = None,  # mm_related_params from ModelConfig (optional)
         grpc_config: Optional[Any] = None,  # grpc_config from PyEnvConfigs (optional)
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
+        server_config=None,
+        master_config=None,
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
@@ -70,6 +72,8 @@ class Pipeline(object):
             sp_config=sp_config,
             grpc_config=grpc_config,
             vit_separation=vit_separation,
+            server_config=server_config,
+            master_config=master_config,
         )
 
     def encode(self, prompt: str):
@@ -301,7 +305,7 @@ class Pipeline(object):
                     )
                 else:
                     tokens = tokens.reshape(-1)
-                tokens_lists_for_decode_input.append(tokens)
+                tokens_lists_for_decode_input.append(tokens.tolist())
         for i, generate_output in enumerate(generate_outputs.generate_outputs):
             tokens_list = tokens_lists_for_decode_input[i]
             output_lens.append(len(tokens_list))
@@ -453,6 +457,8 @@ class Pipeline(object):
             generate_config=generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
+            batch_group_size=kwargs.get("batch_group_size", 1),
+            batch_group_id=kwargs.get("batch_group_id", -1),
         )
 
         stop_word_strs = generate_config.stop_words_str

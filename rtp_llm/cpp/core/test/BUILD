@@ -1,24 +1,45 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "copts", "cc_test_wrapper")
 load("//bazel:arch_select.bzl", "torch_deps")
 
-
-
-test_deps = [
-    "@com_google_googletest//:gtest",
-] + torch_deps()
-
+test_copts = [
+    "-fno-access-control",
+] + copts()
 
 cc_test(
-    name = "qbuffer_test",
-    srcs = [
-        "QBufferTest.cc",
+    name = "exec_ops_test",
+    srcs = ["ExecOpsTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/core:exec_ops_test_lib",
+        "//rtp_llm/cpp/core:exec_ops_hdr",
+        "//rtp_llm/cpp/core:distributed_comm_hdr",
+        "//rtp_llm/cpp/cuda/ops:gpu_base",
+        "//rtp_llm/cpp/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    copts = test_copts,
+    tags = ["manual"],
+)
+
+cc_test(
+    name = "distributed_comm_test",
+    deps = [
+        "//rtp_llm/cpp/core:exec_ops_test_lib",
+        "//rtp_llm/cpp/testing:distributed_test",
+        "//rtp_llm/cpp/cuda/ops:gpu_base",
+        "//rtp_llm/cpp/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    copts = test_copts,
+    tags = ["manual"],
+)
+
+cc_test_wrapper(
+    name = "cache_store_async_writer_test",
+    srcs = ["CacheStoreAsyncWriterTest.cpp"],
+    deps = [
+        "//rtp_llm/cpp/core:cache_store_async_writer",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
     ],
     copts = copts(),
-    deps = test_deps + [
-        "//rtp_llm/cpp/core:buffer",
-        "//rtp_llm/cpp/core:types",
-        "//rtp_llm/cpp/core:buffer_torch",
-
-    ],
-    visibility = ["//visibility:public"],
 )

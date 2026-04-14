@@ -1,5 +1,6 @@
-load("//bazel:arch_select.bzl", "kernel_so_deps", "copy_all_so")
+load("//bazel:arch_select.bzl", "copy_all_so", "kernel_so_deps")
 load("//bazel:defs.bzl", "copy_files")
+
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 copy_all_so()
@@ -8,7 +9,16 @@ copy_all_so()
 copy_files(
     name = "copy_hf3fs_libs",
     srcs = select({
-        "//:using_3fs": ["//3rdparty/3fs:hf3fs_shared"],
+        "//:using_remote_kv_cache": ["//3rdparty/3fs:hf3fs_shared"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+copy_files(
+    name = "copy_remote_kv_cache_manager_client_libs",
+    srcs = select({
+        "//:using_remote_kv_cache": ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_shared"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -17,9 +27,18 @@ copy_files(
 filegroup(
     name = "copy_aiter",
     srcs = select({
-        "@//:using_rocm_with_aiter_src": [":aiter_src_copy", ":deep_ep_rocm_copy"],
-        "@//:using_aiter_src": [":aiter_src_copy", ":deep_ep_rocm_copy"],
-        "@//:using_rocm": [":aiter_copy", ":deep_ep_rocm_copy"],
+        "@//:using_rocm_with_aiter_src": [
+            ":aiter_src_copy",
+            ":deep_ep_rocm_copy",
+        ],
+        "@//:using_aiter_src": [
+            ":aiter_src_copy",
+            ":deep_ep_rocm_copy",
+        ],
+        "@//:using_rocm": [
+            ":aiter_copy",
+            ":deep_ep_rocm_copy",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -28,7 +47,7 @@ filegroup(
 copy_files(
     name = "copy_acclep_libs",
     srcs = select({
-        "//rtp_llm/cpp/devices/cuda_impl:use_accl_ep": ["//3rdparty/accl_ep:accl_ep_shared"],
+        "//rtp_llm/cpp/cuda/ops:use_accl_ep": ["//3rdparty/accl_ep:accl_ep_shared"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -38,12 +57,12 @@ copy_files(
 genrule(
     name = "deep_ep_rocm_copy",
     srcs = select({
-        "//rtp_llm/cpp/devices/rocm_impl:enable_deep_ep": ["@deep_ep_rocm//:cpp_libraries"],
+        "//rtp_llm/cpp/rocm_compat:enable_deep_ep": ["@deep_ep_rocm//:cpp_libraries"],
         "//conditions:default": [],
     }),
     outs = ["libdeep_ep_rocm.so"],
     cmd = select({
-        "//rtp_llm/cpp/devices/rocm_impl:enable_deep_ep": """
+        "//rtp_llm/cpp/rocm_compat:enable_deep_ep": """
             # Copy libdeep_ep_rocm.so from @deep_ep_rocm//:cpp_libraries
             # $(SRCS) contains all files from srcs, filter for .so file
             for f in $(SRCS); do
@@ -58,7 +77,10 @@ genrule(
             echo "void dummy() {}" | gcc -shared -fPIC -x c - -o $(location libdeep_ep_rocm.so) || touch $(location libdeep_ep_rocm.so);
         """,
     }),
-    tags = ["rocm", "local"],
+    tags = [
+        "local",
+        "rocm",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -80,6 +102,7 @@ genrule(
         "libmodule_deepgemm.so",
         "libmodule_attention_asm.so",
         "libmodule_mha_fwd.so",
+        "libmodule_mha_batch_prefill.so",
         "libmodule_fmha_v3_varlen_fwd.so",
         "libmodule_norm.so",
         "libmodule_rmsnorm.so",
@@ -100,6 +123,7 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_pa.so $(locatio
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_activation.so $(location libmodule_activation.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_attention_asm.so $(location libmodule_attention_asm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_mha_fwd.so $(location libmodule_mha_fwd.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_mha_batch_prefill.so $(location libmodule_mha_batch_prefill.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_fmha_v3_varlen_fwd.so $(location libmodule_fmha_v3_varlen_fwd.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_norm.so $(location libmodule_norm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_rmsnorm.so $(location libmodule_rmsnorm.so);
@@ -107,7 +131,10 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_ck2stages.so $(location libmodule_moe_ck2stages.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_deepgemm.so $(location libmodule_deepgemm.so);
 """,
-    tags = ["rocm", "local"],
+    tags = [
+        "local",
+        "rocm",
+    ],
 )
 
 genrule(
@@ -127,6 +154,7 @@ genrule(
         "module_activation.so",
         "module_attention_asm.so",
         "module_mha_fwd.so",
+        "module_mha_batch_prefill.so",
         "module_fmha_v3_varlen_fwd.so",
         "module_norm.so",
         "module_rmsnorm.so",
@@ -148,6 +176,7 @@ genrule(
         cp external/aiter/aiter/jit/module_activation.so $(location module_activation.so);
         cp external/aiter/aiter/jit/module_attention_asm.so $(location module_attention_asm.so);
         cp external/aiter/aiter/jit/module_mha_fwd.so $(location module_mha_fwd.so);
+        cp external/aiter/aiter/jit/module_mha_batch_prefill.so $(location module_mha_batch_prefill.so);
         cp external/aiter/aiter/jit/module_fmha_v3_varlen_fwd.so $(location module_fmha_v3_varlen_fwd.so);
         cp external/aiter/aiter/jit/module_norm.so $(location module_norm.so);
         cp external/aiter/aiter/jit/module_rmsnorm.so $(location module_rmsnorm.so);
@@ -155,33 +184,37 @@ genrule(
         cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so);
         cp external/aiter/aiter/jit/module_deepgemm.so $(location module_deepgemm.so);
 """,
-    tags = ["rocm", "local"],
+    tags = [
+        "local",
+        "rocm",
+    ],
 )
 
 filegroup(
     name = "frontend_libs",
     srcs = [],
     data = [
-        ":libth_transformer_config_so"
-    ]
+        ":libth_transformer_config_so",
+    ],
 )
 
 filegroup(
     name = "libs",
     srcs = [],
     data = [
-        ":copy_hf3fs_libs",
-        ":copy_aiter",
         ":copy_acclep_libs",
-    ] + kernel_so_deps()
+        ":copy_aiter",
+        ":copy_hf3fs_libs",
+        ":copy_remote_kv_cache_manager_client_libs",
+    ] + kernel_so_deps(),
 )
 
 filegroup(
     name = "whl_package_libs",
     srcs = [],
     data = [
+        ":librtp_compute_ops_so",
         ":libth_transformer_config_so",
         ":libth_transformer_so",
-        ":librtp_compute_ops_so",
-    ]
+    ],
 )

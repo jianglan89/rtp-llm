@@ -4,7 +4,8 @@
 #include "autil/TimeUtility.h"
 #include "autil/SynchronizedQueue.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/models/GptModel.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
@@ -19,28 +20,28 @@ namespace rtp_llm {
 // WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
 
 struct StreamUpdateInfo {
-    const rtp_llm::BufferPtr new_tokens;
-    int                      num_new_tokens;
-    const rtp_llm::BufferPtr hidden_states;
-    const rtp_llm::BufferPtr logits;
-    const rtp_llm::BufferPtr softmax_probs;
-    const rtp_llm::BufferPtr cum_log_probs;
-    const rtp_llm::BufferPtr all_probs;
-    const rtp_llm::BufferPtr loss;
-    const rtp_llm::BufferPtr src_batch_indices;
+    const torch::Tensor new_tokens;
+    int                 num_new_tokens;
+    const torch::Tensor hidden_states;
+    const torch::Tensor logits;
+    const torch::Tensor softmax_probs;
+    const torch::Tensor cum_log_probs;
+    const torch::Tensor all_probs;
+    const torch::Tensor loss;
+    const torch::Tensor src_batch_indices;
     // for mtp
-    const rtp_llm::BufferPtr all_hidden_states;
-    bool                     update_remote_generate = true;
-    bool                     force_update_info      = false;
+    const torch::Tensor all_hidden_states;
+    bool                update_remote_generate = true;
+    bool                force_update_info      = false;
 };
 
 struct StreamSpecUpdateInfo {
-    const rtp_llm::BufferPtr new_tokens;
-    int                      num_new_tokens;
+    const torch::Tensor new_tokens;
+    int                 num_new_tokens;
 
-    int                      draft_token;
-    const rtp_llm::BufferPtr draft_hidden_states;
-    const rtp_llm::BufferPtr draft_token_probs;
+    int                 draft_token;
+    const torch::Tensor draft_hidden_states;
+    const torch::Tensor draft_token_probs;
 
     bool update_remote_generate = true;
     bool force_update_info      = false;
@@ -51,33 +52,24 @@ public:
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "SpeculativeExecutorStreamOutput { propose_step : " << propose_step;
-        if (tokens) {
-            debug_string << ", tokens: " << tokens->debugStringWithData<int32_t>();
+        if (tokens.defined()) {
+            debug_string << ", tokens: tensor[" << tokens.numel() << "]";
         }
-        if (logits) {
-            debug_string << ", logits: " << logits->debugStringWithData<int32_t>();
+        if (hidden_states.defined()) {
+            debug_string << ", hidden_states: tensor[" << hidden_states.numel() << "]";
         }
-        if (hidden_states) {
-            debug_string << ", hidden_states: " << hidden_states->debugStringWithData<int32_t>();
-        }
-        if (all_probs) {
-            debug_string << ", all_probs" << all_probs->debugStringWithData<int32_t>();
-        }
-        if (softmax_probs) {
-            debug_string << ", softmax_probs" << softmax_probs->debugStringWithData<float>();
+        if (all_probs.defined()) {
+            debug_string << ", all_probs: tensor[" << all_probs.numel() << "]";
         }
         debug_string << "}";
         return debug_string.str();
     }
 
 public:
-    size_t             propose_step  = 0;
-    rtp_llm::BufferPtr tokens        = nullptr;  // selected tokens
-    rtp_llm::BufferPtr logits        = nullptr;
-    rtp_llm::BufferPtr hidden_states = nullptr;
-    rtp_llm::BufferPtr loss          = nullptr;
-    rtp_llm::BufferPtr all_probs     = nullptr;
-    rtp_llm::BufferPtr softmax_probs = nullptr;
+    size_t        propose_step = 0;
+    torch::Tensor tokens;  // selected tokens
+    torch::Tensor hidden_states;
+    torch::Tensor all_probs;
 
     // hold tensors from grpc
     std::vector<torch::Tensor> tensors_holder;
@@ -90,6 +82,8 @@ using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
 
 class GenerateStream {
 public:
+    static constexpr uint64_t STREAM_MAGIC = 0xA11CE5DEADBEEF01ULL;
+
     GenerateStream(const std::shared_ptr<GenerateInput>& query,
                    const ModelConfig&                    model_config,
                    const RuntimeConfig&                  runtime_config,
@@ -100,6 +94,11 @@ public:
     virtual ~GenerateStream() {
         reportMetric();
         releaseResource();
+        stream_magic_ = 0;
+    }
+
+    bool isStreamAlive() const {
+        return stream_magic_ == STREAM_MAGIC;
     }
 
 public:
@@ -122,7 +121,7 @@ public:
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
     void         specUpdate(const StreamSpecUpdateInfo& update_info);
-    bool         updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_indices);
+    bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
         return score_len_ == 0 ? 1 : score_len_;
@@ -134,11 +133,11 @@ public:
 
     // Only used in C++ world.
     int                  reuseBlockSize() const;
-    void                 fakeInitKVBlock();
+    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     virtual absl::Status initKVBlock(size_t reserve_step = 0);
     virtual absl::Status incrKVBlock(size_t reserve_step = 0);
     virtual void         releaseResource();
-    int                  nextNeedBlockNums(size_t reserve_step) const;
+    int                  nextNeedBlockNums(int reserve_step) const;
     void                 setNeedReleaseResource(bool need_release_resource);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
@@ -148,7 +147,6 @@ public:
     std::vector<int>                 textTokensMask() const;
     bool                             isStreaming() const;
     int64_t                          streamId() const;
-    int                              loraId() const;
     std::string                      adapterName() const;
     rtp_llm::SpecialTokens           specialTokens() const;
 
@@ -196,10 +194,10 @@ public:
     void   setInitialReuseLength(int initial_reuse_length);
     void   incLastOutputPos();
 
-    bool                      isContextStream() const;
-    const rtp_llm::BufferPtr& cumLogProbs() const;
+    bool                 isContextStream() const;
+    const torch::Tensor& cumLogProbs() const;
 
-    const rtp_llm::BufferPtr&         completeTokenIds();
+    torch::Tensor                     completeTokenIds();
     std::shared_ptr<CompleteTokenIds> completeTokenIdsPtr() const {
         return complete_token_ids_;
     }
@@ -212,7 +210,7 @@ public:
 
     std::vector<torch::Tensor> multimodalFeatures() const;
     int                        multimodalFeaturesLength() const;
-    rtp_llm::BufferPtr         multimodalLocations() const;
+    torch::Tensor              multimodalLocations() const;
 
     int64_t      getTimeoutMs() const;
     void         checkTimeout();
@@ -242,8 +240,8 @@ public:
 
     const ResourceContext&      resourceContext() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
-    void                        setLoss(const rtp_llm::Buffer& loss);
-    void                        setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos);
+    void                        setLoss(const torch::Tensor& loss);
+    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos);
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     BatchKVCacheResourcePtr     kvCachePtr();
@@ -263,13 +261,13 @@ public:
     void resetBeginTime(int64_t begin_time_us);
 
     // for test
-    void               setIsContextStream(bool is_context_stream);
-    rtp_llm::BufferPtr getLoss();
-    rtp_llm::BufferPtr getLastHiddenStates() const;
-    void               setLastHiddenStates(rtp_llm::BufferPtr hidden_states) {
-        last_hidden_states_ = hidden_states;
+    void          setIsContextStream(bool is_context_stream);
+    torch::Tensor getLoss();
+    torch::Tensor getLastHiddenStates() const;
+    void          setLastHiddenStates(torch::Tensor hidden_states) {
+        last_hidden_states_ = std::move(hidden_states);
     };
-    rtp_llm::BufferPtr   getSoftmaxProbs();
+    torch::Tensor        getSoftmaxProbs();
     StreamCacheResource& streamCacheResource();
     void                 setPerfTest(bool perf_test_);
     bool                 isPerfTest() const {
@@ -286,16 +284,16 @@ public:
         return return_all_probs_;
     }
 
-    rtp_llm::BufferPtr generateContextPositionIds(rtp_llm::DeviceBase* device);
+    torch::Tensor generateContextPositionIds();
 
-    void generateNextPositionId(int32_t* now_pos, rtp_llm::DeviceBase* device);
+    void generateNextPositionId(int32_t* now_pos);
 
-    rtp_llm::BufferPtr getContextPositionIds() const {
-        return context_position_ids_.has_value() ? context_position_ids_.value() : nullptr;
+    torch::Tensor getContextPositionIds() const {
+        return context_position_ids_.has_value() ? context_position_ids_.value() : torch::Tensor();
     }
 
-    void setContextPositionIds(rtp_llm::BufferPtr context_position_ids) {
-        context_position_ids_ = context_position_ids;
+    void setContextPositionIds(torch::Tensor context_position_ids) {
+        context_position_ids_ = std::move(context_position_ids);
     }
 
     int64_t vocabSize() const {
@@ -404,12 +402,27 @@ public:
         return generate_input_->generate_config->force_sp_accept;
     }
 
-    int64_t interRequestId() const {
-        return generate_input_->generate_config->inter_request_id;
-    }
-
     std::string traceId() const {
         return generate_input_->generate_config->trace_id;
+    }
+
+    int batchGroupSize() const {
+        return generate_input_->batch_group_size;
+    }
+
+    int batchGroupTimeout() const {
+        return generate_input_->generate_config->batch_group_timeout.value_or(100);
+    }
+
+    bool forceBatch() const {
+        return generate_input_->generate_config->force_batch;
+    }
+    int64_t batchGroupId() const {
+        return generate_input_->batch_group_id;
+    }
+
+    int64_t enqueueTime() const {
+        return generate_input_->begin_time_us;
     }
 
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
@@ -420,11 +433,11 @@ public:
         return generator_;
     }
 
-    rtp_llm::BufferPtr getProposeTokens() const {
-        if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens > 0) {
+    torch::Tensor getProposeTokens() const {
+        if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens.defined()) {
             return propose_stream_->sp_output_buffer_->tokens;
         }
-        return nullptr;
+        return torch::Tensor();
     }
 
     void setSPOutputBuffer(SpeculativeExecutorStreamOutputPtr sp_output_buffer) {
@@ -463,16 +476,16 @@ public:
         return generate_input_->generate_config->reuse_cache;
     }
 
-    bool enable3FS() const {
-        return generate_input_->generate_config->enable_3fs;
-    }
-
     bool enableDeviceCache() const {
         return generate_input_->generate_config->enable_device_cache;
     }
 
     bool enableMemoryCache() const {
         return generate_input_->generate_config->enable_memory_cache;
+    }
+
+    bool enableRemoteCache() const {
+        return generate_input_->generate_config->enable_remote_cache;
     }
 
 public:
@@ -486,7 +499,7 @@ public:
     bool     queryPdSep() const;
 
 protected:
-    void updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr& src_batch_indices);
+    void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
     void setNeedRemoteGenerateWithoutLock(bool need_remote_generate) {
         need_remote_generate_ = need_remote_generate;
@@ -494,8 +507,11 @@ protected:
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
+    void reportStreamMetrics();
+    void reportCacheReuseMetrics() const;
+
 protected:
-    rtp_llm::DeviceBase*                 device_;
+    uint64_t                             stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>       generate_input_;
     std::shared_ptr<GenerateStatus>      generate_status_;
     std::vector<GenerateStatus>          sub_generate_status_;
@@ -517,6 +533,7 @@ protected:
     int                                  remote_reuse_length_  = 0;
     int                                  memory_reuse_length_  = 0;
     int                                  reuse_mm_length_      = 0;
+
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
     bool released_              = false;
@@ -535,12 +552,12 @@ protected:
 
     kmonitor::MetricsReporterPtr             metrics_reporter_;
     rtp_llm::SpecialTokens                   special_tokens_;
-    rtp_llm::BufferPtr                       cum_log_probs_;
-    rtp_llm::BufferPtr                       all_probs_;
-    rtp_llm::BufferPtr                       softmax_probs_;
-    rtp_llm::BufferPtr                       loss_;
-    rtp_llm::BufferPtr                       last_hidden_states_ = nullptr;
-    int                                      loss_index_         = 0;
+    torch::Tensor                            cum_log_probs_;
+    torch::Tensor                            all_probs_;
+    torch::Tensor                            softmax_probs_;
+    torch::Tensor                            loss_;
+    torch::Tensor                            last_hidden_states_;
+    int                                      loss_index_ = 0;
     std::shared_ptr<std::mutex>              output_mutex_;
     std::shared_ptr<std::condition_variable> cv_;
 
@@ -560,8 +577,8 @@ protected:
 
     bool return_all_hidden_states_ = false;
 
-    std::optional<rtp_llm::BufferPtr> context_position_ids_;
-    PositionIdsStyle                  mm_position_ids_style_;
+    std::optional<torch::Tensor> context_position_ids_;
+    PositionIdsStyle             mm_position_ids_style_;
 
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;

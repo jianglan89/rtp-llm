@@ -13,28 +13,33 @@ from rtp_llm.models_py.modules.base.common.norm import (
     RMSNormTorch,
     RMSResNormTorch,
 )
-from rtp_llm.ops.compute_ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 
 # Determine device type and import architecture-specific modules
-device_type = get_device().get_device_type()
+device_type = get_exec_ctx().get_device_type()
 
 if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.activation import FusedSiluAndMul
+    from rtp_llm.models_py.modules.base.rocm.moe_gating import SigmoidGateScaleAdd
     from rtp_llm.models_py.modules.base.rocm.norm import (
         AddBiasResLayerNorm,
         FusedQKRMSNorm,
         QKRMSNorm,
         RMSNorm,
+        RMSResNorm,
     )
 
     # Import NotImplementedOp placeholders for ROCm
     from rtp_llm.models_py.modules.base.rocm.not_implemented_ops import (
+        FakeBalanceExpert,
         GroupTopK,
-        RMSResNorm,
+        IndexerOp,
     )
     from rtp_llm.models_py.modules.base.rocm.select_topk import SelectTopk
 else:
     from rtp_llm.models_py.modules.base.cuda.activation import FusedSiluAndMul
+    from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
+    from rtp_llm.models_py.modules.base.cuda.moe_gating import SigmoidGateScaleAdd
     from rtp_llm.models_py.modules.base.cuda.norm import (
         AddBiasResLayerNorm,
         FusedQKRMSNorm,
@@ -42,7 +47,11 @@ else:
         RMSNorm,
         RMSResNorm,
     )
-    from rtp_llm.models_py.modules.base.cuda.select_topk import GroupTopK, SelectTopk
+    from rtp_llm.models_py.modules.base.cuda.select_topk import (
+        FakeBalanceExpert,
+        GroupTopK,
+        SelectTopk,
+    )
 
     __all__ = [
         "Embedding",
@@ -60,5 +69,8 @@ else:
         "RMSResNorm",
         "SelectTopk",
         "GroupTopK",
+        "FakeBalanceExpert",
         "FusedSiluAndMul",
+        "IndexerOp",
+        "SigmoidGateScaleAdd",
     ]

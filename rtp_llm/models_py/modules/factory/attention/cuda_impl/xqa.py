@@ -6,13 +6,43 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
+from rtp_llm.ops import (
+    AttentionConfigs,
+    FMHAConfig,
+    FMHAType,
+    KvCacheDataType,
+    ParallelismConfig,
+)
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     XQAAttnOp,
 )
+
+# Constants
+DEFAULT_XQA_WORKSPACE_SIZE_MB = 248
+
+# Global workspace buffer pool
+_g_xqa_workspace_pool: list[torch.Tensor] = []
+_g_xqa_pool_lock = __import__("threading").Lock()
+
+
+def get_xqa_workspace_buffer(device: str = "cuda") -> torch.Tensor:
+    with _g_xqa_pool_lock:
+        if _g_xqa_workspace_pool:
+            return _g_xqa_workspace_pool.pop()
+        else:
+            return torch.zeros(
+                DEFAULT_XQA_WORKSPACE_SIZE_MB * 1024 * 1024,
+                dtype=torch.uint8,
+                device=device,
+            )
+
+
+def release_xqa_workspace_buffer(buffer: torch.Tensor) -> None:
+    with _g_xqa_pool_lock:
+        _g_xqa_workspace_pool.append(buffer)
 
 
 @dataclass
@@ -29,17 +59,17 @@ class XQAParams:
 class XQAImpl(FMHAImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
-        # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = XQAAttnOp(attn_configs)
         self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
 
-        # Store input info
         self.attn_inputs = attn_inputs
 
-        # Create params
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
@@ -48,27 +78,24 @@ class XQAImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        # Create temporary instance to check support
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: int = 0,
     ) -> torch.Tensor:
-        # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
         else:
             fmha_input = qkv
 
-        # Apply write cache store if needed
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        # Execute FMHA forward
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
@@ -87,16 +114,14 @@ class XQADecodeImpl(FMHAImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
-        # Create XQAWrapper
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = XQAWrapper(attn_configs, attn_inputs)
         self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
 
-        # Store input info
         self.attn_inputs = attn_inputs
 
-        # Create params
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
@@ -105,37 +130,44 @@ class XQADecodeImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        # Create temporary wrapper to check support
-        wrapper = XQAWrapper(attn_configs, attn_inputs)
-        return wrapper.support(None)
+        if attn_inputs.is_prefill:
+            return False
+        group_size = attn_configs.head_num // attn_configs.kv_head_num
+        return (
+            attn_configs.dtype in [torch.bfloat16, torch.float16, torch.float8_e4m3fn]
+            and 1 <= group_size <= 16
+            and attn_configs.size_per_head in [64, 128, 256]
+            and attn_configs.tokens_per_block in [16, 32, 64, 128]
+        )
 
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: int = 0,
     ) -> torch.Tensor:
-        # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
         else:
             fmha_input = qkv
 
-        # Apply write cache store if needed
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        # Execute FMHA forward
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        common.update_trt_params(
-            self.fmha_impl,
-            self.rope_kvcache_impl,
-            self.fmha_params,
-            self.rope_params,
-            attn_inputs,
-        )
+        new_fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.fmha_params.page_table = new_fmha_params.page_table
+        self.fmha_params.seq_lens = new_fmha_params.seq_lens
+        self.fmha_params.batch_size = new_fmha_params.batch_size
+        self.fmha_params.max_seq_len = new_fmha_params.max_seq_len
+
+        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        new_offset = new_rope_params.kv_cache_offset
+        old_offset = self.rope_params.kv_cache_offset
+        common.copy_kv_cache_offset(old_offset, new_offset)
 
 
 class XQAWrapper:
@@ -148,12 +180,11 @@ class XQAWrapper:
         self.attn_inputs = attn_inputs
         self.cu_qseqlens = attn_inputs.cu_seqlens
         assert not self.attn_inputs.is_prefill, "XQA is not supported"
-        # attention_inputs is not used
-        # init workspace_buffer and semaphores
-        self.workspace_buffer = torch.zeros(
-            248 * 1024 * 1024, dtype=torch.uint8, device="cuda"
-        )
+        self.workspace_buffer = get_xqa_workspace_buffer()
         self.semaphores = torch.zeros(8 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+
+    def __del__(self):
+        release_xqa_workspace_buffer(self.workspace_buffer)
 
     def support(self, attn_inputs: Any) -> bool:
         group_size = self.config.head_num // self.config.kv_head_num
@@ -165,7 +196,7 @@ class XQAWrapper:
         ]
         group_size_supported = 1 <= group_size <= 16
         head_dim_supported = self.config.size_per_head in [64, 128, 256]
-        page_size_supported = self.config.tokens_per_block in [16, 32, 64, 128]
+        page_size_supported = self.config.kernel_tokens_per_block in [16, 32, 64, 128]
         return (
             input_type_supported
             and output_type_supported
@@ -182,7 +213,7 @@ class XQAWrapper:
         o_scale: float = 1.0,
     ) -> XQAParams:
         return XQAParams(
-            page_table=attn_inputs.kv_cache_block_id_device,
+            page_table=attn_inputs.kv_cache_kernel_block_id_device,
             seq_lens=attn_inputs.sequence_lengths,
             batch_size=attn_inputs.sequence_lengths.size(0),
             max_seq_len=(
@@ -196,7 +227,6 @@ class XQAWrapper:
         )
 
     def init_spec_mask(self, q_4d: torch.Tensor):
-        # init spec mask
         q_len_per_req = q_4d.shape[1]
         batch_size = q_4d.shape[0]
         if q_len_per_req > 1:
@@ -243,20 +273,19 @@ class XQAWrapper:
     def forward(
         self,
         q: torch.Tensor,  # [total_tokens, num_heads, head_dim]
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         fmha_params: XQAParams,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
-        # [num_pages, num_kv_heads, page_size, head_dim] - HND layout
         k_cache = kv_cache.kv_cache_base[:, 0, ...]
         v_cache = kv_cache.kv_cache_base[:, 1, ...]
         page_table = fmha_params.page_table
-        seq_lens = fmha_params.seq_lens  # cpu device
+        seq_lens = fmha_params.seq_lens
         num_kv_heads = k_cache.shape[1]
         page_size = k_cache.shape[2]
         kv_layout = "HND"
 
         seqlens = torch.diff(self.attn_inputs.decode_cu_seqlens_d).cpu().tolist()
-        # Assert all sequences have the same length for XQA
         assert (
             len(set(seqlens)) == 1
         ), f"All sequences must have the same length for XQA, got lengths: {seqlens}"
@@ -266,9 +295,7 @@ class XQAWrapper:
 
         if seq_lens.dim() == 1:
             new_seq_lens = seq_lens + q_len_per_req
-            seq_lens_4d = (
-                new_seq_lens.unsqueeze(1).to(torch.uint32).to(q.device)
-            )  # [batch_size] -> [batch_size, 1]
+            seq_lens_4d = new_seq_lens.unsqueeze(1).to(torch.uint32).to(q.device)
         else:
             new_seq_lens = seq_lens[:, 0] + q_len_per_req
             seq_lens_4d = new_seq_lens.to(torch.uint32).to(q.device)
@@ -276,21 +303,21 @@ class XQAWrapper:
         enable_pdl = False
         try:
             compute_capability = torch.cuda.get_device_capability(q.device)
-            enable_pdl = compute_capability[0] >= 9  # SM90+
+            enable_pdl = compute_capability[0] >= 9
         except Exception as e:
             logging.warning(
                 f"[XQA] Failed to get GPU compute capability, PDL optimization disabled: {e}"
             )
-            enable_pdl = False
+
         spec_mask = self.init_spec_mask(q_4d)
         q_4d = q_4d.unsqueeze(1).contiguous()
         output = torch.zeros_like(q_4d)
 
-        # when nb_sub_seq_per_seq is None, xqa will use the best config for the current gpu.
-        # https://code.alibaba-inc.com/foundation_models/flashinfer/blob/main/best_config/NVIDIA_L20X_XQA_inbf16_cachefp8_outbf16_ps64_hd128_nq12_nkv1.json
-        from flashinfer.xqa import xqa
+        try:
+            from rtp_kernel.xqa import xqa
+        except ImportError:
+            from flashinfer.xqa import xqa
 
-        # Get scale parameters from fmha_params
         q_scale = fmha_params.q_scale
         kv_scale = fmha_params.kv_scale
         o_scale = fmha_params.o_scale
@@ -328,24 +355,27 @@ def get_xqa_impl() -> Type[FMHAImplBase]:
     Returns XQADecodeImpl if CUDA >= 12.8 and flashinfer.xqa is available,
     otherwise falls back to XQAImpl.
     """
-    try:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        if (major, minor) >= (12, 8):
-            try:
-                from flashinfer.xqa import xqa
+    logging.info(f"using XQA Kernel implementation")
+    return XQAImpl
+    # TODO: cudagraph bazel ut cant pass
+    # try:
+    #     major, minor = map(int, torch.version.cuda.split(".")[:2])
+    #     if (major, minor) >= (12, 8):
+    #         try:
+    #             from flashinfer.xqa import xqa
 
-                logging.info(
-                    "CUDA >= 12.8 and flashinfer.xqa available, using XQADecodeImpl"
-                )
-                return XQADecodeImpl
-            except (ImportError, AttributeError) as e:
-                logging.info(
-                    f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), falling back to XQAImpl"
-                )
-                return XQAImpl
-        else:
-            logging.info(f"CUDA version {major}.{minor} < 12.8, using XQAImpl")
-            return XQAImpl
-    except Exception as e:
-        logging.warning(f"Failed to check CUDA version ({e}), using XQAImpl")
-        return XQAImpl
+    #             logging.info(
+    #                 "CUDA >= 12.8 and flashinfer.xqa available, using XQADecodeImpl"
+    #             )
+    #             return XQADecodeImpl
+    #         except (ImportError, AttributeError) as e:
+    #             logging.info(
+    #                 f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), falling back to XQAImpl"
+    #             )
+    #             return XQAImpl
+    #     else:
+    #         logging.info(f"CUDA version {major}.{minor} < 12.8, using XQAImpl")
+    #         return XQAImpl
+    # except Exception as e:
+    #     logging.warning(f"Failed to check CUDA version ({e}), using XQAImpl")
+    #     return XQAImpl

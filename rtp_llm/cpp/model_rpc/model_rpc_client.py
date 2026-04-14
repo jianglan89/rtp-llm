@@ -15,9 +15,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
-from rtp_llm.distribute.distributed_server import get_world_info
-from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
-from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
@@ -53,6 +50,9 @@ def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
+    input_pb.batch_group_size = input_py.batch_group_size
+    if hasattr(input_py, 'batch_group_id') and input_py.batch_group_id != -1:
+        input_pb.batch_group_id.value = input_py.batch_group_id
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
     # check generate config is valid before enter into engine
@@ -134,20 +134,22 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.gen_timeline = input_py.generate_config.gen_timeline
     generate_config_pb.profile_step = input_py.generate_config.profile_step
     generate_config_pb.global_request_id = input_py.generate_config.global_request_id
-    generate_config_pb.inter_request_id = input_py.generate_config.inter_request_id
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
-    generate_config_pb.enable_3fs = input_py.generate_config.enable_3fs
     generate_config_pb.enable_memory_cache = (
         input_py.generate_config.enable_memory_cache
     )
     generate_config_pb.enable_device_cache = (
         input_py.generate_config.enable_device_cache
     )
-
+    generate_config_pb.enable_remote_cache = (
+        input_py.generate_config.enable_remote_cache
+    )
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
+    trans_option(generate_config_pb, input_py.generate_config, "batch_group_timeout")
+    trans_option(generate_config_pb, input_py.generate_config, "force_batch")
 
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
@@ -411,7 +413,7 @@ class ModelRpcClient(object):
         try:
             # Select target address
             target_address = address_list[input_py.request_id % len(address_list)]
-
+            logging.debug(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)

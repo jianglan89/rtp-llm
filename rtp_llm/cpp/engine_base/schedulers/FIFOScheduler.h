@@ -4,6 +4,7 @@
 #include <tuple>
 #include <vector>
 #include <atomic>
+#include <unordered_map>
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
@@ -71,6 +72,7 @@ protected:
     size_t                          max_generate_batch_size_ = 1;
     const bool                      need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
+    bool                            schedule_trigger_        = false;
     std::mutex                      lock_;
     std::condition_variable         cond_;
     kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;

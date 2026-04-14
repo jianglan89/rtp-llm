@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/torch_utils/TypeConvert.h"
 #include <sstream>
 #include <string>
 
@@ -70,6 +70,10 @@ static std::string quantMethodToString(QuantMethod quant_method) {
             return "FP8Quant";
         case QuantMethod::FP8PTPC:
             return "FP8PTPC";
+        case QuantMethod::W4A8INT4PTPC:
+            return "W4A8INT4PTPC";
+        case QuantMethod::ModelOptFP4:
+            return "ModelOptFP4";
         default:
             return "UNKNOWN(" + std::to_string(static_cast<int>(quant_method)) + ")";
     }
@@ -154,11 +158,21 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
     config.head_num    = config.head_num / tp_size;
     config.kv_head_num = config.kv_head_num / tp_size;
 
+    if (config.kernel_tokens_per_block == 0) {
+        config.kernel_tokens_per_block = config.tokens_per_block;
+    }
+
     // if qk_norm or use embedding model, fuse add bias in gemm
     config.fuse_qkv_add_bias = qk_norm || (config.rope_config.style == RopeStyle::No && !use_kvcache) ? false : true;
 
     // Set dtype from model data type
     config.dtype = dataTypeToTorchType(data_type);
+
+    // Set max_seq_len for RoPE cache generation
+    config.max_seq_len = max_seq_len;
+
+    // Pass gen_num_per_cycle for RoPE cache sizing in speculative decoding
+    config.gen_num_per_cycle = gen_num_per_cycle;
 
     return config;
 }
@@ -222,15 +236,6 @@ std::string ModelConfig::to_string() const {
         << "reverse_e_h_norm: " << reverse_e_h_norm << "\n"
         << "tokenizer_path: " << tokenizer_path << "\n"
         << "ckpt_path: " << ckpt_path << "\n"
-        << "lora_infos: {";
-    bool first = true;
-    for (const auto& pair : lora_infos) {
-        if (!first)
-            oss << ", ";
-        oss << pair.first << ": " << pair.second;
-        first = false;
-    }
-    oss << "}\n"
         << "special_tokens: {\n"
         << "  bos_token_id: " << special_tokens.bos_token_id << "\n"
         << "  eos_token_id: " << special_tokens.eos_token_id << "\n"

@@ -45,6 +45,16 @@ cc_library(
 )
 
 cc_library(
+    name = "profiling_scope",
+    hdrs = [
+        "ProfilingScope.h",
+    ],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "error_code",
     hdrs = [
         "ErrorCode.h",
@@ -139,6 +149,63 @@ cc_library(
     name = "math_utils",
     hdrs = [
         "math_utils.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Linear blocks utilities
+cc_library(
+    name = "linear_blocks_util",
+    hdrs = [
+        "LinearBlocksUtil.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Lightweight tensor debug string utilities
+cc_library(
+    name = "tensor_debug_utils",
+    hdrs = [
+        "TensorDebugUtils.h",
+    ],
+    deps = [
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Debug utilities (migrated from devices/utils/)
+cc_library(
+    name = "debug_utils",
+    hdrs = [
+        "DebugUtils.h",
+    ],
+    srcs = [
+        "DebugUtils.cc",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda/ops:exec_ctx_fwd",
+        "//rtp_llm/cpp/core:type_convert",
+        "//rtp_llm/cpp/core:common_defines",
+    ] + select({
+        "//:using_cuda": ["//rtp_llm/cpp/cuda/ops:gpu_base"],
+        "//conditions:default": [],
+    }),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Device performance wrapper (migrated from devices/utils/)
+cc_library(
+    name = "device_perf_wrapper",
+    hdrs = [
+        "DevicePerfWrapper.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda/ops:exec_ctx_fwd",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

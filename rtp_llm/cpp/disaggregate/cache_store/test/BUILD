@@ -1,7 +1,9 @@
 package(default_visibility = ["//rtp_llm/cpp/disaggregate/cache_store:__subpackages__"])
 
-load("//:def.bzl", "copts")
-load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
+load("//:def.bzl", "cc_test_wrapper", "copts")
+load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
+
+cc_test = cc_test_wrapper
 
 test_base_sources = [
     "test_util/BlockBufferUtil.cpp",
@@ -21,9 +23,11 @@ cc_library(
     hdrs = test_base_includes,
     deps = [
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
-        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/core:devices_base",
         "@com_google_googletest//:gtest",
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/cuda/ops:cuda_impl",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
     ],
     visibility=['//visibility:public'],
 )
@@ -34,6 +38,7 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         ":cache_store_test_base",
+        "//rtp_llm/cpp/core:exec_ops_test_lib",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + device_impl_target(),
@@ -42,6 +47,6 @@ cc_test(
         "DEVICE_RESERVE_MEMORY_BYTES": "128000000",
     },
     copts = ["-fno-access-control"] + copts(),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
