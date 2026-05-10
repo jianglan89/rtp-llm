@@ -1,6 +1,8 @@
 from __future__ import annotations
-import torch
+
 import typing
+
+import torch
 
 __all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
                       'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
@@ -214,15 +216,25 @@ class CPRotateMethod:
 
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
+    wrr_available_ratio: int
+    rank_factor: int
+    thread_count: int
+    rdma_connect_timeout_ms: int
+    rdma_qp_count_per_connection: int
+    rdma_io_thread_count: int
+    rdma_worker_thread_count: int
     messager_io_thread_count: int
     messager_worker_thread_count: int
-    rank_factor: int
-    rdma_connect_timeout_ms: int
-    rdma_io_thread_count: int
-    rdma_qp_count_per_connection: int
-    rdma_worker_thread_count: int
-    thread_count: int
-    wrr_available_ratio: int
+    rdma_transfer_wait_timeout_ms: int
+    rdma_max_block_pairs_per_connection: int
+    p2p_read_steal_before_deadline_ms: int
+    p2p_read_return_before_deadline_ms: int
+    p2p_transfer_not_done_resource_hold_ms: int
+    p2p_resource_store_timeout_check_interval_ms: int
+    p2p_layer_cache_buffer_store_timeout_ms: int
+    p2p_cancel_broadcast_timeout_ms: int
+    cache_store_tcp_anet_rpc_thread_num: int
+    cache_store_tcp_anet_rpc_queue_num: int
 
     def __getstate__(self) -> tuple:
         ...
@@ -1154,7 +1166,6 @@ class ModelConfig:
 
 
 class ModelSpecificConfig:
-    load_python_model: bool
     max_lora_model_size: int
 
     def __getstate__(self) -> tuple:
@@ -1384,14 +1395,12 @@ class ProfilingDebugLoggingConfig:
     debug_start_fake_process: bool
     enable_detail_log: bool
     enable_device_perf: bool
-    enable_torch_alloc_profile: bool
     ft_alog_conf_path: str
     ft_core_dump_on_exception: bool
     gen_timeline_sync: bool
     hack_layer_num: int
     log_file_backup_count: int
     torch_cuda_profiler_dir: str
-    trace_malloc_stack: bool
     trace_memory: bool
 
     def __getstate__(self) -> tuple:
@@ -1731,15 +1740,12 @@ class RopeStyle:
 
 
 class RuntimeConfig:
-    acext_gemm_config_dir: str
     max_block_size_per_item: int
     max_generate_batch_size: int
     model_name: str
-    pre_allocate_op_mem: bool
     reserve_runtime_mem_mb: int
     specify_gpu_arch: str
     use_batch_decode_scheduler: bool
-    use_gather_batch_scheduler: bool
     warm_up: bool
     warm_up_with_loss: bool
     worker_addrs: list[str]

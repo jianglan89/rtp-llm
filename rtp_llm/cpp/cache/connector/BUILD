@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "connector",
@@ -18,6 +18,8 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "@havenask//aios/autil:json",
@@ -35,11 +37,28 @@ cc_library(
     hdrs = [
         "AsyncContext.h",
         "KVCacheConnector.h",
+        "KVCacheConnectorLayerContext.h",
         "Meta.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/utils:error_code",
+    ],
+)
+
+cc_library(
+    name = "connector_header",
+    hdrs = [
+        "IKVCacheConnectorCoordinator.h",
+        "KVCacheConnectorReadWriteContext.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":connector_base",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:error_code",
     ],
 )

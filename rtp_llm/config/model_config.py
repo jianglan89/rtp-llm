@@ -9,12 +9,12 @@ import torch
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     QuantizationConfig,
+    W4a8Int4PerChannelQuantConfig,
     init_quant_config,
 )
 from rtp_llm.ops import DataType, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
-from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 from rtp_llm.utils.util import get_config_from_path, to_torch_dtype
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
@@ -610,6 +610,15 @@ class ModelConfig(CppModelConfig):
                 f"Overriding data_type from {original_data_type} to {data_type} "
                 f"because {quant_config.get_method()} quantization requires FP16"
             )
+        elif quant_config and isinstance(quant_config, W4a8Int4PerChannelQuantConfig):
+            if data_type not in [WEIGHT_TYPE.BF16, WEIGHT_TYPE.FP16]:
+                original_data_type = data_type
+                data_type = WEIGHT_TYPE.BF16
+                logging.info(
+                    f"Overriding data_type from {original_data_type} to {data_type} "
+                    f"because w4a8_int4_per_channel quantization only supports BF16/FP16, "
+                    "ACT_TYPE can be configured manually."
+                )
 
         # Set attn_config.kv_cache_dtype based on kv_cache_config
         if kv_cache_config is not None:
@@ -845,9 +854,6 @@ def build_model_config(
         model_config.hidden_size = (
             model_config.attn_config.size_per_head * model_config.attn_config.head_num
         )
-
-    # Load cutlass gemm config
-    load_cutlass_gemm_config(model_config.quant_algo)
 
     # Apply hack_layer_num if needed
     hack_layer_num = profiling_debug_logging_config.hack_layer_num

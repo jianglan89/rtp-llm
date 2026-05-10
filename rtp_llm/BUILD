@@ -2,8 +2,7 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "triton_deps")
-load("//open_source/bazel:arch_select.bzl", "platform_deps")
+load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "triton_deps", "platform_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
 load("@release_version//:defs.bzl", "RELEASE_VERSION")
@@ -16,11 +15,6 @@ load(
 
 if_rocm = _if_rocm
 
-tensorrt = [
-    "tensorrt",
-    "tensorrt-cu12-bindings",
-    "tensorrt-cu12-libs",
-]
 
 flashinfer = [
     "apache-tvm-ffi",
@@ -98,6 +92,7 @@ requirement([
     "thrift",
     "torch",
     "torchvision",
+    "triton",
     "numpy",
     "safetensors",
     "einops",
@@ -133,13 +128,8 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-] + tensorrt + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
+] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
-filegroup(
-    name = "cutlass_config",
-    srcs = glob(["utils/gemm_utils/luts/*"]),
-    visibility = ["//visibility:public"],
-)
 
 py_library(
     name = "empty_target",
@@ -153,7 +143,6 @@ py_library(
     srcs = glob([
         "utils/**/*.py",
     ]),
-    data = [":cutlass_config"],
     deps = [
         ":torch",
         ":safetensors",
@@ -238,6 +227,7 @@ py_library(
         ":pillow-avif-plugin",
         ":torch",
         ":torchvision",
+        ":triton",
         ":pyOpenSSL",
         ":einops",
         ":utils",
@@ -251,10 +241,6 @@ py_library(
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
         "@//:using_cuda": deep,
-        "//conditions:default": []
-    }) + select({
-        "@//:using_cuda12_9_x86": tensorrt,
-        "@//:cuda_pre_12_9": tensorrt,
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
@@ -623,7 +609,7 @@ py_wheel(
     version = RELEASE_VERSION,
     deps = [
         ":rtp_llm_frontend_package",
-        "//deps:extension_package_frontend"
+        "@rtp_deps//:extension_package_frontend"
     ],
     requires = whl_reqs,
 )
@@ -648,7 +634,7 @@ py_wheel(
     },
     deps = [
         ":rtp_llm_package",
-        "//deps:extension_package"
+        "@rtp_deps//:extension_package"
     ],
     requires = whl_reqs,
 )
@@ -661,7 +647,7 @@ py_wheel(
     version = RELEASE_VERSION,
     deps = [
         ":rtp_llm_package",
-        "//deps:extension_package",
+        "@rtp_deps//:extension_package",
     ],
     requires = whl_reqs + [
         "kserve",
@@ -719,7 +705,7 @@ py_library(
     deps = [
         ":rtp_llm_lib",
         "//rtp_llm/test/utils:test_util",
-        "//deps:extension_lib",
+        "@rtp_deps//:extension_lib",
         ":aiohttp",
     ]
 )

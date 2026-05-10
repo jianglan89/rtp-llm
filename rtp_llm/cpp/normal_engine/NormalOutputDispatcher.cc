@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/ops/StandaloneOps.h"
+#include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
 #include "ATen/cuda/CUDAContext.h"
 #endif
 
@@ -150,7 +150,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     for (int i = 0; i < cur_batch_size; ++i) {
         if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
-            stream->setStop(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
+            stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
         }
     }
 

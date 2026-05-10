@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
@@ -17,7 +17,7 @@ cc_test(
     copts = test_copts,
     deps = torch_deps() + [
         "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/cpp/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/engine_base/stream:stream",

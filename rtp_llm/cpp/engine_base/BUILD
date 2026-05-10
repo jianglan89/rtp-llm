@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 
 # Weights converter for model weight conversion
@@ -13,7 +13,7 @@ cc_library(
     ],
     deps = [
         "//:rtp_compute_ops",
-        "//rtp_llm/cpp/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/pybind:py_utils",
     ],
     visibility = ["//visibility:public"],

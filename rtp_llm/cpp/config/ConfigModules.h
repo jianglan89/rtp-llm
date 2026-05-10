@@ -5,12 +5,11 @@
 #include <map>
 #include <vector>
 #include "rtp_llm/cpp/config/RoleTypes.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
 
-/** NCCL communication config (ip + ports). When set, initExecCtx uses this
- * instead of ParallelismConfig for master_ip and tp/dp_tp/ffn_tp ports. Aligns with Python NcclCommConfig. */
+/** NCCL communication config (ip + ports). Aligns with Python NcclCommConfig. */
 struct NcclCommConfig {
     std::string master_ip   = "";
     int64_t     tp_port     = 0;
@@ -133,7 +132,10 @@ struct FMHAConfig {
     bool        enable_xqa                    = true;
     bool        use_aiter_pa                  = true;
     bool        use_asm_pa                    = true;
-    bool        use_triton_pa                 = true;
+    // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
+    // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
+    // back into the Triton kernel.
+    bool        use_triton_pa                 = false;
     int64_t     absorb_opt_len                = 1024;
     std::string to_string() const;
 };
@@ -165,6 +167,7 @@ struct KVCacheConfig {
     bool    write_cache_sync             = false;
     bool    enable_tiered_memory_cache   = false;
     int64_t device_cache_min_free_blocks = 0;
+    int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
@@ -192,20 +195,18 @@ struct KVCacheConfig {
 };
 
 struct ProfilingDebugLoggingConfig {
-    bool        trace_memory               = false;
-    bool        trace_malloc_stack         = false;
-    bool        enable_device_perf         = false;
-    bool        ft_core_dump_on_exception  = false;
-    std::string ft_alog_conf_path          = "";
-    bool        gen_timeline_sync          = false;
-    std::string torch_cuda_profiler_dir    = "";
-    int         log_file_backup_count      = 16;
-    bool        debug_load_server          = false;
-    int         hack_layer_num             = 0;
-    bool        debug_start_fake_process   = false;
-    bool        enable_detail_log          = false;
-    bool        check_nan                  = false;
-    bool        enable_torch_alloc_profile = false;
+    bool        trace_memory              = false;
+    bool        enable_device_perf        = false;
+    bool        ft_core_dump_on_exception = false;
+    std::string ft_alog_conf_path         = "";
+    bool        gen_timeline_sync         = false;
+    std::string torch_cuda_profiler_dir   = "";
+    int         log_file_backup_count     = 16;
+    bool        debug_load_server         = false;
+    int         hack_layer_num            = 0;
+    bool        debug_start_fake_process  = false;
+    bool        enable_detail_log         = false;
+    bool        check_nan                 = false;
 
     std::string to_string() const;
 };
@@ -213,7 +214,6 @@ struct ProfilingDebugLoggingConfig {
 struct HWKernelConfig {
     int         deep_gemm_num_sm             = -1;
     bool        arm_gemm_use_kai             = false;
-    bool        enable_stable_scatter_add    = false;
     bool        enable_multi_block_mode      = true;
     bool        ft_disable_custom_ar         = true;
     std::string rocm_hipblaslt_config        = "gemm_config.csv";
@@ -230,8 +230,6 @@ struct HWKernelConfig {
     std::vector<int> decode_capture_batch_sizes;
     bool             disable_dpc_random     = false;
     bool             rocm_disable_custom_ag = true;
-    bool             deterministic_gemm     = false;
-    bool             deterministic_attn     = false;
     std::string      to_string() const;
 };
 
@@ -261,7 +259,6 @@ struct MoeConfig {
 };
 
 struct ModelSpecificConfig {
-    bool        load_python_model = false;
     std::string to_string() const;
 };
 
@@ -298,16 +295,31 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool        cache_store_rdma_mode        = false;
-    int         wrr_available_ratio          = 80;
-    int         rank_factor                  = 0;
-    int         thread_count                 = 16;
-    int         rdma_connect_timeout_ms      = 250;
-    int         rdma_qp_count_per_connection = 2;
-    int         rdma_io_thread_count         = 4;
-    int         rdma_worker_thread_count     = 2;
-    int         messager_io_thread_count     = 2;
-    int         messager_worker_thread_count = 16;
+    bool    cache_store_rdma_mode               = false;
+    int     wrr_available_ratio                 = 80;
+    int     rank_factor                         = 0;
+    int     thread_count                        = 16;
+    int     rdma_connect_timeout_ms             = 250;
+    int     rdma_qp_count_per_connection        = 2;
+    int     rdma_io_thread_count                = 4;
+    int     rdma_worker_thread_count            = 2;
+    int     messager_io_thread_count            = 2;
+    int     messager_worker_thread_count        = 16;
+    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
+    int64_t p2p_read_steal_before_deadline_ms =
+        250;  // Decode read：在此距 deadline 时从 recv store steal，阻止新 transfer 匹配
+    int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
+                                                       // 须在 D 前该毫秒数完成（与对端 recv/send 对齐）
+    int64_t p2p_transfer_not_done_resource_hold_ms =
+        10 * 1000;  // Scheduler：TRANSFER_NOT_DONE 后延迟 done 以保留显存安全窗口
+
+    int     p2p_resource_store_timeout_check_interval_ms = 100;
+    int64_t p2p_layer_cache_buffer_store_timeout_ms      = 100 * 1000;
+    int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
+    int     cache_store_tcp_anet_rpc_thread_num          = 3;
+    int     cache_store_tcp_anet_rpc_queue_num           = 100;
+
     std::string to_string() const;
 };
 
@@ -319,22 +331,14 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size           = 1;
-    int64_t     scheduler_reserve_resource_ratio = 5;
-    int64_t     max_batch_tokens_size            = 0;
-    std::string to_string() const;
-};
-
-struct SchedulerConfig {
-    bool        use_batch_decode_scheduler = false;
-    bool        use_gather_batch_scheduler = false;
+    int64_t     max_context_batch_size = 1;
+    int64_t     max_batch_tokens_size  = 0;
     std::string to_string() const;
 };
 
 struct RuntimeConfig {
     int64_t max_generate_batch_size = 1;
 
-    bool    pre_allocate_op_mem     = true;
     int64_t max_block_size_per_item = 16;
 
     int64_t reserve_runtime_mem_mb = 0;
@@ -343,7 +347,6 @@ struct RuntimeConfig {
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;
-    bool                       use_gather_batch_scheduler = false;
     BatchDecodeSchedulerConfig batch_decode_scheduler_config;
     FIFOSchedulerConfig        fifo_scheduler_config;
 
@@ -352,8 +355,7 @@ struct RuntimeConfig {
     std::vector<std::string> worker_addrs;
 
     // Fields merged from PyDeviceResourceConfig
-    std::string specify_gpu_arch      = "";
-    std::string acext_gemm_config_dir = "";
+    std::string specify_gpu_arch = "";
 
     std::string to_string() const;
 };

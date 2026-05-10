@@ -75,19 +75,27 @@ public:
     bool can_use_pd_separation = true;
     bool pd_separation         = false;
 
-    bool             in_think_mode       = false;
-    int              max_thinking_tokens = 0;
-    std::vector<int> end_think_token_ids;
-    bool             gen_timeline        = false;
-    int              profile_step        = 3;
-    bool             ignore_eos          = false;
-    bool             reuse_cache         = true;
-    bool             enable_device_cache = true;
-    bool             enable_memory_cache = true;
-    bool             enable_remote_cache = true;
-    std::string      trace_id;
+    bool               in_think_mode       = false;
+    int                max_thinking_tokens = 0;
+    std::vector<int>   end_think_token_ids;
+    bool               gen_timeline = false;
+    int                profile_step = 3;
+    std::string        profile_trace_name;
+    bool               ignore_eos          = false;
+    bool               reuse_cache         = true;
+    bool               enable_device_cache = true;
+    bool               enable_memory_cache = true;
+    bool               enable_remote_cache = true;
+    std::string        trace_id;
     bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
     std::optional<int> batch_group_timeout;
+    std::string      unique_key;
+
+    // 生成式推荐：组合 token 粒度去重与曝光过滤
+    // combo_token_size 表示一个商品由多少个连续 token 组成（0 表示关闭该功能）
+    int                           combo_token_size = 0;
+    // banned_combo_token_ids 是禁止生成的商品 token 组合列表，每项长度应等于 combo_token_size
+    std::vector<std::vector<int>> banned_combo_token_ids;
 
     bool top1() {
         return top_k == 1;
@@ -141,7 +149,9 @@ public:
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch << "}";
+                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch << ", unique_key: " << unique_key
+                     << ", combo_token_size: " << combo_token_size
+                     << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size() << "}";
         return debug_string.str();
     }
 
@@ -216,6 +226,7 @@ public:
         JSONIZE(end_think_token_ids);
         JSONIZE(gen_timeline);
         JSONIZE(profile_step);
+        JSONIZE(profile_trace_name);
         JSONIZE(reuse_cache);
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);
@@ -223,6 +234,9 @@ public:
         JSONIZE(force_batch);
         JSONIZE(aux_info);
         JSONIZE_OPTIONAL(batch_group_timeout);
+        JSONIZE(unique_key);
+        JSONIZE(combo_token_size);
+        JSONIZE(banned_combo_token_ids);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

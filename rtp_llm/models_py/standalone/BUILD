@@ -1,4 +1,4 @@
-load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps", "requirement")
+load("@arch_config//:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps", "requirement")
 
 # Create aliases for fast-safetensors packages from the main rtp_llm BUILD
 requirement(["fast-safetensors", "fastsafetensors"])
@@ -73,6 +73,9 @@ py_library(
             "//rtp_llm:amdsmi",
         ],
         "@//:using_cuda12": [
+            "//rtp_llm:deep_gemm",
+        ],
+        "@//:using_ppu": [
             "//rtp_llm:deep_gemm",
         ],
         "//conditions:default": [],

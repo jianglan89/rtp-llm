@@ -114,10 +114,15 @@ public:
                     std::function<bool()>                 is_cancelled = nullptr);
 
     bool hasActiveConnectors() const;
+    bool hasP2PConnector() const;
 
     std::shared_ptr<KVCacheConnectorCoordinator> connectorCoordinator() const {
         return coordinator_;
     }
+
+    // Increment KV cache reference count for PD separation (connector refcount)
+    std::shared_ptr<KVCacheResource>
+    incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
 
 private:
     void initConnectorCoordinator();

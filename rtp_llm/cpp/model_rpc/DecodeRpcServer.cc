@@ -87,23 +87,27 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
-    auto input = QueryConverter::transQuery(&decode_context.allocate_request.input());
-    if (applyTimelineGate(
-            decode_context.request_key, input->generate_config->gen_timeline, input->generate_config->profile_step)) {
-        input->generate_config->gen_timeline = true;
-    }
+    auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
     auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
 
-    auto status = generate_stream->initKVBlock();
+    // Set CanRun event so that handleWaiting() will execute initKVBlock()
+    generate_stream->reportEvent(StreamEvents::CanRun);
     decode_context.setStream(generate_stream);
-    if (!status.ok()) {
+
+    // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
+    // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
+    // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
+    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
+        this_thread::sleep_for(chrono::milliseconds(1));
+    }
+    if (generate_stream->hasError()) {
         string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
         RTP_LLM_LOG_ERROR(error_msg);
-        generate_stream->setStop(ErrorCode::DECODE_MALLOC_FAILED, "decode malloc failed");
         decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
         return;
     }
+
     GRPC_RET_IF_ERROR(decode_context,
                       decode_context.rpc_context.grpc_stream->Write(GenerateOutputsPB()),
                       grpc::StatusCode::INTERNAL,

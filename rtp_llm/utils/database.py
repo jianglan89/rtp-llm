@@ -85,6 +85,18 @@ class CkptDatabase(BaseDatabase):
             f"CkptDatabase all tensor names = {self.get_pretrain_tensor_names()}"
         )
 
+        # Build tensor_name -> CkptFileInfo index for O(1) lookup.
+        # If a tensor name appears in multiple files, the last file wins.
+        # In practice safetensors checkpoints guarantee each tensor is in
+        # exactly one shard, so duplicates should not occur.
+        self._tensor_index: Dict[str, CkptFileInfo] = {}
+        for ckpt_file in self.pretrain_file_list:
+            for tname in ckpt_file.metadata.keys():
+                self._tensor_index[tname] = ckpt_file
+        for ckpt_file in self.finetune_file_list:
+            for tname in ckpt_file.metadata.keys():
+                self._tensor_index[tname] = ckpt_file
+
     @property
     def is_ft_style(self) -> bool:
         return self._is_ft_style
@@ -98,7 +110,43 @@ class CkptDatabase(BaseDatabase):
         return self._ft_weight_params
 
     def get_max_file_size(self) -> int:
+        if not self.pretrain_file_list:
+            return 0
         return max([file.file_size for file in self.pretrain_file_list])
+
+    def filter_by_tensor_name_regexes(
+        self, required_tensor_patterns: List[re.Pattern[str]]
+    ):
+        """Keep only pretrain checkpoint files containing tensors required by the model.
+
+        Finetune files, such as ptuning weights, are intentionally left untouched
+        because they are small and still need to be applied after pretrain loading.
+        """
+        if len(self.pretrain_file_list) <= 1 or not required_tensor_patterns:
+            return
+
+        def is_required_file(ckpt_file: CkptFileInfo) -> bool:
+            return any(
+                pattern.fullmatch(tensor_name)
+                for tensor_name in ckpt_file.get_tensor_names()
+                for pattern in required_tensor_patterns
+            )
+
+        original_count = len(self.pretrain_file_list)
+        filtered_file_list = [
+            ckpt for ckpt in self.pretrain_file_list if is_required_file(ckpt)
+        ]
+        if not filtered_file_list:
+            logging.warning(
+                "filter_by_tensor_name_regexes found no matching checkpoint files; "
+                "keep original pretrain_file_list"
+            )
+            return
+
+        self.pretrain_file_list = filtered_file_list
+        logging.info(
+            f"filter_by_tensor_name_regexes: {original_count} -> {len(self.pretrain_file_list)} files"
+        )
 
     def load_hf_meta(self, path: str):
         # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
@@ -157,25 +205,13 @@ class CkptDatabase(BaseDatabase):
     def load_tensor(
         self, name: str, data_type: Optional[torch.dtype] = torch.float16
     ) -> List[torch.Tensor]:
-        tensors = []
-        for ckpt_file in self.pretrain_file_list:
-            if name in ckpt_file.get_tensor_names():
-                tensors.append(ckpt_file.load_tensor(name, data_type))
-
-        for ckpt_file in self.finetune_file_list:
-            if name in ckpt_file.get_tensor_names():
-                tensors.append(ckpt_file.load_tensor(name, data_type))
-
-        return tensors
+        ckpt_file = self._tensor_index.get(name)
+        if ckpt_file is not None:
+            return [ckpt_file.load_tensor(name, data_type)]
+        return []
 
     def has_tensor(self, name: str) -> bool:
-        for ckpt_file in self.pretrain_file_list:
-            if name in ckpt_file.get_tensor_names():
-                return True
-        for ckpt_file in self.finetune_file_list:
-            if name in ckpt_file.get_tensor_names():
-                return True
-        return False
+        return name in self._tensor_index
 
     def get_tensor_type(self, name: str) -> torch.dtype:
         return self.pretrain_file_list[0].get_tensor_type(name)

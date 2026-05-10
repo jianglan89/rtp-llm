@@ -10,7 +10,7 @@
 #undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
@@ -48,7 +48,7 @@ public:
         sp_output_buffer->tokens     = torch::tensor(propose_tokens, torch::kInt32).reshape({1, 2});
         stream->setReturnAllProbs(true);
         stream->setSPOutputBuffer(sp_output_buffer);
-        stream->setRunning();
+        stream->generate_status_->status = StreamState::RUNNING;
         stream->setNeedReleaseResource(false);
 
         return stream;

@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
-#include "rtp_llm/cpp/engine_base/schedulers/GatherBatchScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -118,10 +117,21 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
-        executor_.reset(new MtpExecutor(params, propose_params, resource_context_.cache_manager, exec_init_params_));
+        executor_.reset(new MtpExecutor(params,
+                                        propose_params,
+                                        resource_context_.cache_manager,
+                                        mla_ops_type_,
+                                        kv_cache_group_num_,
+                                        kv_cache_layer_to_group_));
     } else {
-        executor_.reset(
-            new NormalExecutor(params, resource_context_.cache_manager, false, false, 0, exec_init_params_));
+        executor_.reset(new NormalExecutor(params,
+                                           resource_context_.cache_manager,
+                                           false,
+                                           false,
+                                           0,
+                                           mla_ops_type_,
+                                           kv_cache_group_num_,
+                                           kv_cache_layer_to_group_));
     }
 }
 
@@ -130,15 +140,6 @@ void NormalEngine::initScheduler() {
         scheduler_.reset(new BatchDecodeScheduler(
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
-    } else if (runtime_config.use_gather_batch_scheduler) {
-        scheduler_.reset(new GatherBatchScheduler(runtime_config,
-                                                  model_config_,
-                                                  pd_sep_config,
-                                                  parallelism_config,
-                                                  model_specific_config,
-                                                  resource_context_.cache_manager,
-                                                  metrics_reporter_));
-        RTP_LLM_LOG_INFO("create gather batch scheduler done");
     } else {
         scheduler_.reset(new FIFOScheduler(runtime_config,
                                            model_config_,
@@ -171,6 +172,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         size_t reserved_blocks    = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block + reserve_step_;
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
+        stream->setReserveStep(reserve_step_);
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
     };
     std::list<GenerateStreamPtr> streams{stream};
@@ -222,7 +224,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, exec_init_params_));
+    executor_.reset(new NormalExecutor(
+        params, nullptr, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -254,7 +257,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, exec_init_params_));
+    executor_.reset(new NormalExecutor(
+        params, cache_manager, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -313,9 +317,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
             RTP_LLM_FAIL("init kv cache manager failed");
         }
 
-        const auto& cache_cfg                     = resource_context_.cache_manager->cacheConfig();
-        exec_init_params_.kv_cache_group_num      = cache_cfg.groupNums();
-        exec_init_params_.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
+        const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
+        kv_cache_group_num_      = cache_cfg.groupNums();
+        kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
@@ -330,9 +334,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
-        const auto& cache_cfg                     = resource_context_.cache_manager->cacheConfig();
-        exec_init_params_.kv_cache_group_num      = cache_cfg.groupNums();
-        exec_init_params_.kv_cache_layer_to_group = cache_cfg.layer_to_group_id;
+        const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
+        kv_cache_group_num_      = cache_cfg.groupNums();
+        kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;
     }
 }
 
@@ -378,7 +382,7 @@ absl::Status NormalEngine::stop() {
 void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
-    cudaPreRun(exec_init_params_.device_id);
+    cudaPreRun(getDeviceId());
     while (running_) {
         auto status = step();
         if (!status.ok()) {
@@ -399,12 +403,14 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
+    stream->setReserveStep(reserve_step_);
     (void)scheduler_->enqueue(stream);
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    stream->setReserveStep(reserve_step_);
     (void)scheduler_->enqueue(stream);
     return stream;
 }
@@ -416,10 +422,10 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
     for (auto& inp : inputs) {
         auto stream = std::make_shared<NormalGenerateStream>(
             inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        stream->setReserveStep(reserve_step_);
         streams.push_back(stream);
     }
-    (void)scheduler_->batchEnqueue(streams);
-    return streams;
+    return scheduler_->batchEnqueue(streams);
 }
 
 absl::Status NormalEngine::step() {
@@ -433,7 +439,7 @@ absl::Status NormalEngine::step() {
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
-            CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
+            CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
@@ -450,14 +456,30 @@ absl::Status NormalEngine::step() {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
+
+    // If any stream in this batch requested gen_timeline AND no profiling session is
+    // already active, configure + tick BEFORE process() so the profiler is up before
+    // the actual work runs. This guarantees the trace captures THIS step's work, not
+    // the next step's. If a session is already active (e.g. external StartProfile RPC),
+    // skip — first-come-first-served.
+    if (!step_profiler_.enabled()) {
+        for (const auto& stream : streams) {
+            if (stream && stream->genTimeline()) {
+                const auto& cfg = stream->generateConfig();
+                step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
+                step_profiler_.tick();  // start profiler now (start_step=0)
+                break;
+            }
+        }
+    }
+
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams);
     }
 
-    // tick profiler after process() so that all TP ranks (which synchronize
-    // inside process() via NCCL) start/stop the profiler at the same point,
-    // giving aligned time windows across ranks.
+    // tick profiler after process() to count this step (and stop when num_steps reached).
+    // All TP ranks synchronize inside process() via NCCL, so stop happens at aligned points.
     step_profiler_.tick();
 
     // report step metrics
@@ -479,10 +501,6 @@ bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
 
 void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {
     step_profiler_.configure(true, trace_name, start_step, num_steps);
-}
-
-bool NormalEngine::isTimelineProfilingEnabled() const {
-    return step_profiler_.enabled();
 }
 
 bool NormalEngine::isMTPEagle() {

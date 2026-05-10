@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
@@ -40,8 +40,8 @@ py_test(
         ".",
     ],
     env = select({
-        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM", "DEVICE_RESERVE_MEMORY_BYTES": "128"},
-        "//conditions:default": {"TEST_USING_DEVICE": "CUDA", "DEVICE_RESERVE_MEMORY_BYTES": "128"},
+        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
     }),
     exec_properties = {'gpu':'H20'},
 )

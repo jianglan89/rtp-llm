@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 
@@ -511,9 +511,8 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncWrite(const std::shared_ptr<
     return async_context;
 }
 
-std::shared_ptr<AsyncContext> RemoteConnector::asyncWriteByLayer(int                                     layer_id,
-                                                                 const std::shared_ptr<KVCacheResource>& resource,
-                                                                 const std::shared_ptr<Meta>&            meta) {
+std::shared_ptr<AsyncContext>
+RemoteConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
     throw std::runtime_error("Not Implement");
     return nullptr;
 }

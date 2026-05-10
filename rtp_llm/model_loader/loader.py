@@ -385,22 +385,32 @@ class ModelLoader:
             for layer_id in range(self._load_config.num_layers):
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):
-                    names = layer_weights.get_tensor_names(layer_id, self._load_config)
-                    collector = TensorCollector(names, self._load_config.database)
-                    weight_info = WeightInfo(
-                        weight=layer_weights, layer_id=layer_id, collector=collector
-                    )
-                    tensor_to_weight_map.update({k: weight_info for k in names})
-                    weight_info_list.append(weight_info)
-                else:
-                    for weight in layer_weights:
-                        names = weight.get_tensor_names(layer_id, self._load_config)
+                    # For CompositeWeight (e.g. MoeWithSharedWeight), split into
+                    # sub-components so each gets its own collector. This prevents
+                    # large stacked MoE tensors from accumulating in a single
+                    # collector waiting for all sub-weights to arrive.
+                    for component in layer_weights.get_components():
+                        names = component.get_tensor_names(layer_id, self._load_config)
                         collector = TensorCollector(names, self._load_config.database)
                         weight_info = WeightInfo(
-                            weight=weight, layer_id=layer_id, collector=collector
+                            weight=component, layer_id=layer_id, collector=collector
                         )
                         tensor_to_weight_map.update({k: weight_info for k in names})
                         weight_info_list.append(weight_info)
+                else:
+                    for weight in layer_weights:
+                        for component in weight.get_components():
+                            names = component.get_tensor_names(
+                                layer_id, self._load_config
+                            )
+                            collector = TensorCollector(
+                                names, self._load_config.database
+                            )
+                            weight_info = WeightInfo(
+                                weight=component, layer_id=layer_id, collector=collector
+                            )
+                            tensor_to_weight_map.update({k: weight_info for k in names})
+                            weight_info_list.append(weight_info)
         for weight in self._model_weights_info.weights:
             if self._maybe_skip_weight(weight):
                 continue
@@ -469,18 +479,24 @@ class ModelLoader:
         if database is None:
             return
 
-        # 清理 CkptFileInfo 的元数据
+        # 清理 CkptFileInfo 的元数据和缓存的 safetensors 句柄
         if database.pretrain_file_list is not None:
             for ckpt_file in database.pretrain_file_list:
+                ckpt_file.close_safetensor_handle()
                 if ckpt_file.metadata is not None:
                     ckpt_file.metadata = None
             database.pretrain_file_list.clear()
 
         if database.finetune_file_list is not None:
             for ckpt_file in database.finetune_file_list:
+                ckpt_file.close_safetensor_handle()
                 if ckpt_file.metadata is not None:
                     ckpt_file.metadata = None
             database.finetune_file_list.clear()
+
+        # 清理 tensor 索引
+        if hasattr(database, "_tensor_index"):
+            database._tensor_index.clear()
 
         # 清理 LoRA 缓存
         if database.lora_ckpt is not None:
@@ -533,7 +549,6 @@ class ModelLoader:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
                 weights.set_global_weight(name, tensor)
-            gc.collect()
         return weights
 
     def _load_layer_weights(self, layer_id: int, device: str):
@@ -694,14 +709,6 @@ def get_model_loader(
         raise Exception(
             "invalid tp_size %d for config.head_num %d"
             % (weights_info.tp_size, weights_info._head_num)
-        )
-    if (
-        weights_info._head_num_kv % weights_info.tp_size != 0
-        and weights_info._head_num_kv != 1
-    ):
-        raise Exception(
-            "invalid tp_size %d for config.head_num_kv %d"
-            % (weights_info.tp_size, weights_info._head_num_kv)
         )
     return ModelLoader(
         model_config,

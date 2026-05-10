@@ -8,6 +8,7 @@ from grpc import StatusCode
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    BatchGenerateInputPB,
     ErrorDetailsPB,
     GenerateInputPB,
     GenerateOutputsPB,
@@ -51,7 +52,7 @@ def trans_input(input_py: GenerateInput):
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.batch_group_size = input_py.batch_group_size
-    if hasattr(input_py, 'batch_group_id') and input_py.batch_group_id != -1:
+    if hasattr(input_py, "batch_group_id") and input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
@@ -133,6 +134,7 @@ def trans_input(input_py: GenerateInput):
     )
     generate_config_pb.gen_timeline = input_py.generate_config.gen_timeline
     generate_config_pb.profile_step = input_py.generate_config.profile_step
+    generate_config_pb.profile_trace_name = input_py.generate_config.profile_trace_name
     generate_config_pb.global_request_id = input_py.generate_config.global_request_id
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
@@ -154,6 +156,14 @@ def trans_input(input_py: GenerateInput):
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
         stop_words.values.extend(input_py.generate_config.stop_words_list[i])
+
+    # 生成式推荐：组合 token 约束
+    generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
+    for i in range(len(input_py.generate_config.banned_combo_token_ids)):
+        banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
+        banned_combo.values.extend(
+            input_py.generate_config.banned_combo_token_ids[i]
+        )
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
@@ -375,20 +385,49 @@ class ModelRpcClient(object):
         )
         logging.info(f"addresses: {self._addresses}")
 
-    async def enqueue(
-        self, input_py: GenerateInput
-    ) -> AsyncGenerator[GenerateOutputs, None]:
-        request_timeout_ms = input_py.generate_config.timeout_ms
+    def _compute_grpc_timeout(self, timeout_ms) -> float:
         rpc_timeout_ms = (
             self._max_rpc_timeout_ms
             if self._max_rpc_timeout_ms > 0
             else MAX_GRPC_TIMEOUT_SECONDS * 1000
         )
-        if request_timeout_ms == None or request_timeout_ms <= 0:
-            grpc_timeout_seconds = rpc_timeout_ms / 1000
+        if timeout_ms is None or timeout_ms <= 0:
+            return rpc_timeout_ms / 1000
+        return timeout_ms / 1000
+
+    def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str) -> None:
+        error_details = ErrorDetailsPB()
+        metadata = e.trailing_metadata()
+        if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
+            metadata["grpc-status-details-bin"]
+        ):
+            logging.error(
+                f"{request_desc} RPC failed: "
+                f"{e.code()}, {e.details()}, detail error code is "
+                f"{ExceptionType.from_value(error_details.error_code)}"
+            )
+            raise FtRuntimeException(
+                ExceptionType(error_details.error_code), error_details.error_message
+            )
         else:
-            grpc_timeout_seconds = request_timeout_ms / 1000
-        input_py.generate_config.timeout_ms = (int)(grpc_timeout_seconds * 1000)
+            logging.error(
+                f"{request_desc} RPC failed: "
+                f"error code is {e.code()}, detail is {e.details()}"
+            )
+            if e.code() == StatusCode.DEADLINE_EXCEEDED:
+                raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, e.details())
+            elif e.code() == StatusCode.CANCELLED:
+                raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
+            else:
+                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
+
+    async def enqueue(
+        self, input_py: GenerateInput
+    ) -> AsyncGenerator[GenerateOutputs, None]:
+        grpc_timeout_seconds = self._compute_grpc_timeout(
+            input_py.generate_config.timeout_ms
+        )
+        input_py.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
         input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
@@ -425,38 +464,60 @@ class ModelRpcClient(object):
             async for response in response_iterator.__aiter__():
                 yield trans_output(input_py, response, stream_state)
         except grpc.RpcError as e:
-            # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
                 response_iterator.cancel()
-            error_details = ErrorDetailsPB()
-            metadata = e.trailing_metadata()
-            if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
-                metadata["grpc-status-details-bin"]
-            ):
-                logging.error(
-                    f"request: [{input_pb.request_id}] RPC failed: "
-                    f"{e.code()}, {e.details()}, detail error code is "
-                    f"{ExceptionType.from_value(error_details.error_code)}"
-                )
-                raise FtRuntimeException(
-                    ExceptionType(error_details.error_code), error_details.error_message
-                )
-            else:
-                logging.error(
-                    f"request: [{input_pb.request_id}] RPC failed: "
-                    f"error code is {e.code()}, detail is {e.details()}"
-                )
-                if e.code() == StatusCode.DEADLINE_EXCEEDED:
-                    raise FtRuntimeException(
-                        ExceptionType.GENERATE_TIMEOUT, e.details()
-                    )
-                elif e.code() == StatusCode.CANCELLED:
-                    raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
-                else:
-                    raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
+            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]")
         except Exception as e:
             logging.error(f"rpc unknown error:{str(e)}")
             raise e
         finally:
             if response_iterator:
                 response_iterator.cancel()
+
+    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        if not inputs:
+            return []
+
+        max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
+        grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
+
+        batch_input_pb = BatchGenerateInputPB()
+        for inp in inputs:
+            inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
+            input_pb = trans_input(inp)
+            batch_input_pb.inputs.append(input_pb)
+
+        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
+        logging.debug(
+            f"batch request: [{len(inputs)} items] send to address: {target_address}"
+        )
+
+        try:
+            channel = await self._channel_pool.get(target_address)
+            stub = RpcServiceStub(channel)
+            response = await stub.BatchGenerateCall(
+                batch_input_pb, timeout=grpc_timeout_seconds
+            )
+
+            results = []
+            for i, result_pb in enumerate(response.results):
+                if (
+                    result_pb.HasField("error_info")
+                    and result_pb.error_info.error_message
+                ):
+                    raise FtRuntimeException(
+                        ExceptionType.UNKNOWN_ERROR,
+                        f"batch item {i} failed: {result_pb.error_info.error_message}",
+                    )
+                stream_state = StreamState()
+                output = trans_output(inputs[i], result_pb.final_output, stream_state)
+                results.append(output)
+            return results
+
+        except grpc.RpcError as e:
+            self._handle_grpc_error(e, f"batch request: [{len(inputs)} items]")
+        except FtRuntimeException:
+            raise
+        except Exception as e:
+            logging.error(f"batch rpc unknown error: {str(e)}")
+            raise e

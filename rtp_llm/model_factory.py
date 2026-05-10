@@ -84,7 +84,6 @@ class ModelFactory:
             kv_cache_config=engine_config.kv_cache_config,
             fmha_config=engine_config.fmha_config,
             moe_config=engine_config.moe_config,
-            load_python_model=engine_config.model_specific_config.load_python_model,
             load_method=engine_config.load_config.load_method,
             max_generate_batch_size=engine_config.runtime_config.max_generate_batch_size,
             vit_config=vit_config,
@@ -154,7 +153,6 @@ class ModelFactory:
                 kv_cache_config=engine_config.kv_cache_config,
                 fmha_config=engine_config.fmha_config,
                 moe_config=engine_config.moe_config,
-                load_python_model=engine_config.model_specific_config.load_python_model,
                 load_method=engine_config.load_config.load_method,
                 max_generate_batch_size=engine_config.runtime_config.max_generate_batch_size,
                 device_resource_config=engine_config.device_resource_config,
@@ -384,6 +382,7 @@ class ModelFactory:
         propose_model_args.model_type = sp_config.model_type
         propose_model_args.act_type = model_args.act_type
         propose_model_args.mla_ops_type = model_args.mla_ops_type
+        propose_model_args.enable_fp32_lm_head = model_args.enable_fp32_lm_head
 
         # Create propose ModelConfig using _create_config
         propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)

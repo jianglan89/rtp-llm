@@ -1,6 +1,6 @@
 load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
+load("@arch_config//:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 flashinfer_deps()
 
@@ -50,16 +50,12 @@ config_setting(
     values = {"define": "using_rocm=true"},
 )
 
-config_setting(
-    name = "using_aiter_src",
-    values = {"define": "using_aiter_src=true"},
-)
 
 config_setting(
-    name = "using_rocm_with_aiter_src",
+    name = "rocm_gfx950",
     define_values = {
         "using_rocm": "true",
-        "using_aiter_src": "true",
+        "gfx950": "true",
     },
 )
 
@@ -84,6 +80,11 @@ selects.config_setting_group(
 config_setting(
     name = "xft_use_icx",
     values = {"define": "xft_use_icx=true"},
+)
+
+config_setting(
+    name = "using_ppu",
+    define_values = {"use_ppu": "true"},
 )
 
 config_setting(

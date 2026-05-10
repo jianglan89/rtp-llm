@@ -2,13 +2,14 @@
 
 import logging
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
+
 # Import the factory after lists are defined to avoid circular imports
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
 )
-from rtp_llm.ops.compute_ops import DeviceType, get_exec_ctx
 
 __all__ = [
     "FMHAImplBase",
@@ -26,7 +27,7 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     PREFILL_MLA_IMPS,
 )
 
-device_type = get_exec_ctx().get_device_type()
+device_type = get_device_type()
 if device_type == DeviceType.ROCm:
     # Import to register ROCm FMHA implementations
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
@@ -41,9 +42,9 @@ if device_type == DeviceType.ROCm:
     PREFILL_MHA_IMPS.append(AiterPrefillImplPaged)
     PREFILL_MHA_IMPS.append(AiterPrefillImplAsm)
     PREFILL_MHA_IMPS.append(AiterPrefillImplNonAsm)
+    DECODE_MHA_IMPS.append(AiterDecodeImplTriton)
     DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
     DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
-    DECODE_MHA_IMPS.append(AiterDecodeImplTriton)
 else:
     # currently append early means impl has higher priority
     if device_type == DeviceType.Cuda:
@@ -114,20 +115,14 @@ else:
         except (ImportError, AttributeError, ValueError):
             pass  # Skip SparseMlaImpl if CUDA < 12.9 or flash_mla not available
 
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
-            FlashInferDecodeImpl,
-            FlashInferPrefillImpl,
-        )
-
-        PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
-        DECODE_MHA_IMPS.append(FlashInferDecodeImpl)
-
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
         PyFlashinferDecodeImpl,
+        PyFlashinferPagedPrefillImpl,
         PyFlashinferPrefillImpl,
     )
 
     PREFILL_MHA_IMPS.append(PyFlashinferPrefillImpl)
+    PREFILL_MHA_IMPS.append(PyFlashinferPagedPrefillImpl)
     DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
 
     from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (

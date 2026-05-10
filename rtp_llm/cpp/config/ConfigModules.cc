@@ -128,11 +128,11 @@ std::string KVCacheConfig::to_string() const {
         << "use_block_cache: " << use_block_cache << "\n"
         << "enable_device_cache: " << enable_device_cache << "\n"
         << "enable_memory_cache: " << enable_memory_cache << "\n"
-        << "enable_memory_cache_sm_copy: " << enable_memory_cache_sm_copy << "\n"
         << "enable_remote_cache: " << enable_remote_cache << "\n"
         << "write_cache_sync: " << write_cache_sync << "\n"
         << "enable_tiered_memory_cache: " << enable_tiered_memory_cache << "\n"
-        << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n";
+        << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
+        << "load_cache_retry_times: " << load_cache_retry_times << "\n";
     return oss.str();
 }
 
@@ -140,7 +140,6 @@ std::string KVCacheConfig::to_string() const {
 std::string ProfilingDebugLoggingConfig::to_string() const {
     std::ostringstream oss;
     oss << "trace_memory: " << trace_memory << "\n"
-        << "trace_malloc_stack: " << trace_malloc_stack << "\n"
         << "enable_device_perf: " << enable_device_perf << "\n"
         << "ft_core_dump_on_exception: " << ft_core_dump_on_exception << "\n"
         << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
@@ -151,8 +150,7 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "hack_layer_num: " << hack_layer_num << "\n"
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "enable_detail_log: " << enable_detail_log << "\n"
-        << "check_nan: " << check_nan << "\n"
-        << "enable_torch_alloc_profile: " << enable_torch_alloc_profile << "\n";
+        << "check_nan: " << check_nan << "\n";
     return oss.str();
 }
 
@@ -180,7 +178,6 @@ std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
     oss << "deep_gemm_num_sm: " << deep_gemm_num_sm << "\n"
         << "arm_gemm_use_kai: " << arm_gemm_use_kai << "\n"
-        << "enable_stable_scatter_add: " << enable_stable_scatter_add << "\n"
         << "enable_multi_block_mode: " << enable_multi_block_mode << "\n"
         << "ft_disable_custom_ar: " << ft_disable_custom_ar << "\n"
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
@@ -192,9 +189,7 @@ std::string HWKernelConfig::to_string() const {
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
         << "disable_dpc_random: " << disable_dpc_random << "\n"
-        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag << "\n"
-        << "deterministic_gemm: " << deterministic_gemm << "\n"
-        << "deterministic_attn: " << deterministic_attn;
+        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag;
     return oss.str();
 }
 
@@ -230,7 +225,7 @@ std::string MoeConfig::to_string() const {
 // ModelSpecificConfig
 std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
-    oss << "load_python_model:" << load_python_model << "\n";
+    // Empty struct — no fields remaining.
     return oss.str();
 }
 
@@ -321,7 +316,17 @@ std::string CacheStoreConfig::to_string() const {
         << "rdma_io_thread_count: " << rdma_io_thread_count << "\n"
         << "rdma_worker_thread_count: " << rdma_worker_thread_count << "\n"
         << "messager_io_thread_count: " << messager_io_thread_count << "\n"
-        << "messager_worker_thread_count: " << messager_worker_thread_count << "\n";
+        << "messager_worker_thread_count: " << messager_worker_thread_count << "\n"
+        << "rdma_max_block_pairs_per_connection: " << rdma_max_block_pairs_per_connection << "\n"
+        << "rdma_transfer_wait_timeout_ms: " << rdma_transfer_wait_timeout_ms << "\n"
+        << "p2p_read_steal_before_deadline_ms: " << p2p_read_steal_before_deadline_ms << "\n"
+        << "p2p_read_return_before_deadline_ms: " << p2p_read_return_before_deadline_ms << "\n"
+        << "p2p_transfer_not_done_resource_hold_ms: " << p2p_transfer_not_done_resource_hold_ms << "\n"
+        << "p2p_resource_store_timeout_check_interval_ms: " << p2p_resource_store_timeout_check_interval_ms << "\n"
+        << "p2p_layer_cache_buffer_store_timeout_ms: " << p2p_layer_cache_buffer_store_timeout_ms << "\n"
+        << "p2p_cancel_broadcast_timeout_ms: " << p2p_cancel_broadcast_timeout_ms << "\n"
+        << "cache_store_tcp_anet_rpc_thread_num: " << cache_store_tcp_anet_rpc_thread_num << "\n"
+        << "cache_store_tcp_anet_rpc_queue_num: " << cache_store_tcp_anet_rpc_queue_num << "\n";
     return oss.str();
 }
 
@@ -330,14 +335,6 @@ std::string MiscellaneousConfig::to_string() const {
     std::ostringstream oss;
     oss << "disable_pdl: " << disable_pdl << "\n"
         << "aux_string: " << aux_string << "\n";
-    return oss.str();
-}
-
-// SchedulerConfig
-std::string SchedulerConfig::to_string() const {
-    std::ostringstream oss;
-    oss << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
-        << "use_gather_batch_scheduler: " << use_gather_batch_scheduler;
     return oss.str();
 }
 
@@ -361,13 +358,11 @@ std::string FIFOSchedulerConfig::to_string() const {
 std::string RuntimeConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_generate_batch_size: " << max_generate_batch_size << "\n"
-        << "pre_allocate_op_mem: " << pre_allocate_op_mem << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "\n"
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
-        << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"
         << batch_decode_scheduler_config.to_string() << "\n}\n"
         << "fifo_scheduler_config: {\n"
@@ -387,8 +382,7 @@ std::string RuntimeConfig::to_string() const {
             oss << ", ";
     }
     oss << "]\n"
-        << "specify_gpu_arch: " << specify_gpu_arch << "\n"
-        << "acext_gemm_config_dir: " << acext_gemm_config_dir;
+        << "specify_gpu_arch: " << specify_gpu_arch;
     return oss.str();
 }
 

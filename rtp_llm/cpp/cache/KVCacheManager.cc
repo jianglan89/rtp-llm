@@ -11,8 +11,8 @@
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
-#include "rtp_llm/cpp/core/ExecOps.h"
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
@@ -252,7 +252,6 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
     auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
 
-    layout.layer_to_groups.resize(config_.layer_num);
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_num);
     if (!all_scale_tensors.empty()) {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
@@ -260,6 +259,7 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
 
     layout.layer_to_groups = config_.layer_to_group_id;
     layout.group_types     = config_.group_types;
+    layout.layer_to_groups.resize(config_.layer_num);
     layout.layer_attn_types.resize(config_.layer_num, CacheGroupType::FULL);
 
     RTP_LLM_CHECK_WITH_INFO(config_.layer_num <= all_layer_tensors.size(),
@@ -438,6 +438,16 @@ std::shared_ptr<CacheStore> KVCacheManager::getCacheStore() const {
 
 bool KVCacheManager::hasActiveConnectors() const {
     return coordinator_ && coordinator_->hasActiveConnectors();
+}
+
+// PD separation: increment KV cache reference count
+std::shared_ptr<KVCacheResource>
+KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector) {
+    return allocator_->incrKVCacheRef(resource, cache_keys, is_connector);
+}
+
+bool KVCacheManager::hasP2PConnector() const {
+    return coordinator_ && coordinator_->hasP2PConnector();
 }
 
 // 异步连接器操作

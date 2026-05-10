@@ -304,6 +304,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
+        .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -433,7 +434,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<ProfilingDebugLoggingConfig>(m, "ProfilingDebugLoggingConfig")
         .def(py::init<>())
         .def_readwrite("trace_memory", &ProfilingDebugLoggingConfig::trace_memory)
-        .def_readwrite("trace_malloc_stack", &ProfilingDebugLoggingConfig::trace_malloc_stack)
         .def_readwrite("enable_device_perf", &ProfilingDebugLoggingConfig::enable_device_perf)
         .def_readwrite("ft_core_dump_on_exception", &ProfilingDebugLoggingConfig::ft_core_dump_on_exception)
         .def_readwrite("ft_alog_conf_path", &ProfilingDebugLoggingConfig::ft_alog_conf_path)
@@ -445,12 +445,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("debug_start_fake_process", &ProfilingDebugLoggingConfig::debug_start_fake_process)
         .def_readwrite("enable_detail_log", &ProfilingDebugLoggingConfig::enable_detail_log)
         .def_readwrite("check_nan", &ProfilingDebugLoggingConfig::check_nan)
-        .def_readwrite("enable_torch_alloc_profile", &ProfilingDebugLoggingConfig::enable_torch_alloc_profile)
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def(py::pickle(
             [](const ProfilingDebugLoggingConfig& self) {
                 return py::make_tuple(self.trace_memory,
-                                      self.trace_malloc_stack,
                                       self.enable_device_perf,
                                       self.ft_core_dump_on_exception,
                                       self.ft_alog_conf_path,
@@ -461,29 +459,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.hack_layer_num,
                                       self.debug_start_fake_process,
                                       self.enable_detail_log,
-                                      self.check_nan,
-                                      self.enable_torch_alloc_profile);
+                                      self.check_nan);
             },
             [](py::tuple t) {
-                if (t.size() != 14)
+                if (t.size() != 12)
                     throw std::runtime_error("Invalid state!");
 
                 ProfilingDebugLoggingConfig c;
                 try {
-                    c.trace_memory               = t[0].cast<bool>();
-                    c.trace_malloc_stack         = t[1].cast<bool>();
-                    c.enable_device_perf         = t[2].cast<bool>();
-                    c.ft_core_dump_on_exception  = t[3].cast<bool>();
-                    c.ft_alog_conf_path          = t[4].cast<std::string>();
-                    c.gen_timeline_sync          = t[5].cast<bool>();
-                    c.torch_cuda_profiler_dir    = t[6].cast<std::string>();
-                    c.log_file_backup_count      = t[7].cast<int>();
-                    c.debug_load_server          = t[8].cast<bool>();
-                    c.hack_layer_num             = t[9].cast<int>();
-                    c.debug_start_fake_process   = t[10].cast<bool>();
-                    c.enable_detail_log          = t[11].cast<bool>();
-                    c.check_nan                  = t[12].cast<bool>();
-                    c.enable_torch_alloc_profile = t[13].cast<bool>();
+                    c.trace_memory              = t[0].cast<bool>();
+                    c.enable_device_perf        = t[1].cast<bool>();
+                    c.ft_core_dump_on_exception = t[2].cast<bool>();
+                    c.ft_alog_conf_path         = t[3].cast<std::string>();
+                    c.gen_timeline_sync         = t[4].cast<bool>();
+                    c.torch_cuda_profiler_dir   = t[5].cast<std::string>();
+                    c.log_file_backup_count     = t[6].cast<int>();
+                    c.debug_load_server         = t[7].cast<bool>();
+                    c.hack_layer_num            = t[8].cast<int>();
+                    c.debug_start_fake_process  = t[9].cast<bool>();
+                    c.enable_detail_log         = t[10].cast<bool>();
+                    c.check_nan                 = t[11].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ProfilingDebugLoggingConfig unpickle error: ") + e.what());
                 }
@@ -495,7 +490,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("deep_gemm_num_sm", &HWKernelConfig::deep_gemm_num_sm)
         .def_readwrite("arm_gemm_use_kai", &HWKernelConfig::arm_gemm_use_kai)
-        .def_readwrite("enable_stable_scatter_add", &HWKernelConfig::enable_stable_scatter_add)
         .def_readwrite("enable_multi_block_mode", &HWKernelConfig::enable_multi_block_mode)
         .def_readwrite("ft_disable_custom_ar", &HWKernelConfig::ft_disable_custom_ar)
         .def_readwrite("rocm_hipblaslt_config", &HWKernelConfig::rocm_hipblaslt_config)
@@ -508,14 +502,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("decode_capture_batch_sizes", &HWKernelConfig::decode_capture_batch_sizes)
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
-        .def_readwrite("deterministic_gemm", &HWKernelConfig::deterministic_gemm)
-        .def_readwrite("deterministic_attn", &HWKernelConfig::deterministic_attn)
         .def("to_string", &HWKernelConfig::to_string)
         .def(py::pickle(
             [](const HWKernelConfig& self) {
                 return py::make_tuple(self.deep_gemm_num_sm,
                                       self.arm_gemm_use_kai,
-                                      self.enable_stable_scatter_add,
                                       self.enable_multi_block_mode,
                                       self.ft_disable_custom_ar,
                                       self.rocm_hipblaslt_config,
@@ -527,32 +518,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefill_capture_seq_lens,
                                       self.decode_capture_batch_sizes,
                                       self.disable_dpc_random,
-                                      self.rocm_disable_custom_ag,
-                                      self.deterministic_gemm,
-                                      self.deterministic_attn);
+                                      self.rocm_disable_custom_ag);
             },
             [](py::tuple t) {
-                if (t.size() != 17)
+                if (t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
                     c.deep_gemm_num_sm             = t[0].cast<int>();
                     c.arm_gemm_use_kai             = t[1].cast<bool>();
-                    c.enable_stable_scatter_add    = t[2].cast<bool>();
-                    c.enable_multi_block_mode      = t[3].cast<bool>();
-                    c.ft_disable_custom_ar         = t[4].cast<bool>();
-                    c.rocm_hipblaslt_config        = t[5].cast<std::string>();
-                    c.use_swizzleA                 = t[6].cast<bool>();
-                    c.enable_cuda_graph            = t[7].cast<bool>();
-                    c.enable_cuda_graph_debug_mode = t[8].cast<bool>();
-                    c.enable_native_cuda_graph     = t[9].cast<bool>();
-                    c.num_native_cuda_graph        = t[10].cast<int>();
-                    c.prefill_capture_seq_lens     = t[11].cast<std::vector<int>>();
-                    c.decode_capture_batch_sizes   = t[12].cast<std::vector<int>>();
-                    c.disable_dpc_random           = t[13].cast<bool>();
-                    c.rocm_disable_custom_ag       = t[14].cast<bool>();
-                    c.deterministic_gemm           = t[15].cast<bool>();
-                    c.deterministic_attn           = t[16].cast<bool>();
+                    c.enable_multi_block_mode      = t[2].cast<bool>();
+                    c.ft_disable_custom_ar         = t[3].cast<bool>();
+                    c.rocm_hipblaslt_config        = t[4].cast<std::string>();
+                    c.use_swizzleA                 = t[5].cast<bool>();
+                    c.enable_cuda_graph            = t[6].cast<bool>();
+                    c.enable_cuda_graph_debug_mode = t[7].cast<bool>();
+                    c.enable_native_cuda_graph     = t[8].cast<bool>();
+                    c.num_native_cuda_graph        = t[9].cast<int>();
+                    c.prefill_capture_seq_lens     = t[10].cast<std::vector<int>>();
+                    c.decode_capture_batch_sizes   = t[11].cast<std::vector<int>>();
+                    c.disable_dpc_random           = t[12].cast<bool>();
+                    c.rocm_disable_custom_ag       = t[13].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
                 }
@@ -645,21 +631,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             }));
 
     // Register ModelSpecificConfig
-    py::class_<ModelSpecificConfig>(m, "ModelSpecificConfig")
+    py::class_<ModelSpecificConfig>(m, "ModelSpecificConfig", py::dynamic_attr())
         .def(py::init<>())
-        .def_readwrite("load_python_model", &ModelSpecificConfig::load_python_model)
         .def("to_string", &ModelSpecificConfig::to_string)
-        .def(py::pickle([](const ModelSpecificConfig& self) { return py::make_tuple(self.load_python_model); },
+        .def(py::pickle([](const ModelSpecificConfig& self) { return py::make_tuple(); },
                         [](py::tuple t) {
-                            if (t.size() != 1)
-                                throw std::runtime_error("Invalid state!");
                             ModelSpecificConfig c;
-                            try {
-                                c.load_python_model = t[0].cast<bool>();
-                            } catch (const std::exception& e) {
-                                throw std::runtime_error(std::string("ModelSpecificConfig unpickle error: ")
-                                                         + e.what());
-                            }
                             return c;
                         }));
 
@@ -758,6 +735,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("rdma_worker_thread_count", &CacheStoreConfig::rdma_worker_thread_count)
         .def_readwrite("messager_io_thread_count", &CacheStoreConfig::messager_io_thread_count)
         .def_readwrite("messager_worker_thread_count", &CacheStoreConfig::messager_worker_thread_count)
+        .def_readwrite("rdma_transfer_wait_timeout_ms", &CacheStoreConfig::rdma_transfer_wait_timeout_ms)
+        .def_readwrite("rdma_max_block_pairs_per_connection", &CacheStoreConfig::rdma_max_block_pairs_per_connection)
+        .def_readwrite("p2p_read_steal_before_deadline_ms", &CacheStoreConfig::p2p_read_steal_before_deadline_ms)
+        .def_readwrite("p2p_read_return_before_deadline_ms", &CacheStoreConfig::p2p_read_return_before_deadline_ms)
+        .def_readwrite("p2p_transfer_not_done_resource_hold_ms",
+                       &CacheStoreConfig::p2p_transfer_not_done_resource_hold_ms)
+        .def_readwrite("p2p_resource_store_timeout_check_interval_ms",
+                       &CacheStoreConfig::p2p_resource_store_timeout_check_interval_ms)
+        .def_readwrite("p2p_layer_cache_buffer_store_timeout_ms",
+                       &CacheStoreConfig::p2p_layer_cache_buffer_store_timeout_ms)
+        .def_readwrite("p2p_cancel_broadcast_timeout_ms", &CacheStoreConfig::p2p_cancel_broadcast_timeout_ms)
+        .def_readwrite("cache_store_tcp_anet_rpc_thread_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_thread_num)
+        .def_readwrite("cache_store_tcp_anet_rpc_queue_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_queue_num)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -770,23 +760,43 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.rdma_io_thread_count,
                                       self.rdma_worker_thread_count,
                                       self.messager_io_thread_count,
-                                      self.messager_worker_thread_count);
+                                      self.messager_worker_thread_count,
+                                      self.rdma_transfer_wait_timeout_ms,
+                                      self.rdma_max_block_pairs_per_connection,
+                                      self.p2p_read_steal_before_deadline_ms,
+                                      self.p2p_read_return_before_deadline_ms,
+                                      self.p2p_transfer_not_done_resource_hold_ms,
+                                      self.p2p_resource_store_timeout_check_interval_ms,
+                                      self.p2p_layer_cache_buffer_store_timeout_ms,
+                                      self.p2p_cancel_broadcast_timeout_ms,
+                                      self.cache_store_tcp_anet_rpc_thread_num,
+                                      self.cache_store_tcp_anet_rpc_queue_num);
             },
             [](py::tuple t) {
-                if (t.size() != 10)
+                if (t.size() != 20)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
-                    c.cache_store_rdma_mode        = t[0].cast<bool>();
-                    c.wrr_available_ratio          = t[1].cast<int>();
-                    c.rank_factor                  = t[2].cast<int>();
-                    c.thread_count                 = t[3].cast<int>();
-                    c.rdma_connect_timeout_ms      = t[4].cast<int>();
-                    c.rdma_qp_count_per_connection = t[5].cast<int>();
-                    c.rdma_io_thread_count         = t[6].cast<int>();
-                    c.rdma_worker_thread_count     = t[7].cast<int>();
-                    c.messager_io_thread_count     = t[8].cast<int>();
-                    c.messager_worker_thread_count = t[9].cast<int>();
+                    c.cache_store_rdma_mode                        = t[0].cast<bool>();
+                    c.wrr_available_ratio                          = t[1].cast<int>();
+                    c.rank_factor                                  = t[2].cast<int>();
+                    c.thread_count                                 = t[3].cast<int>();
+                    c.rdma_connect_timeout_ms                      = t[4].cast<int>();
+                    c.rdma_qp_count_per_connection                 = t[5].cast<int>();
+                    c.rdma_io_thread_count                         = t[6].cast<int>();
+                    c.rdma_worker_thread_count                     = t[7].cast<int>();
+                    c.messager_io_thread_count                     = t[8].cast<int>();
+                    c.messager_worker_thread_count                 = t[9].cast<int>();
+                    c.rdma_transfer_wait_timeout_ms                = t[10].cast<int64_t>();
+                    c.rdma_max_block_pairs_per_connection          = t[11].cast<int>();
+                    c.p2p_read_steal_before_deadline_ms            = t[12].cast<int64_t>();
+                    c.p2p_read_return_before_deadline_ms           = t[13].cast<int64_t>();
+                    c.p2p_transfer_not_done_resource_hold_ms       = t[14].cast<int64_t>();
+                    c.p2p_resource_store_timeout_check_interval_ms = t[15].cast<int>();
+                    c.p2p_layer_cache_buffer_store_timeout_ms      = t[16].cast<int64_t>();
+                    c.p2p_cancel_broadcast_timeout_ms              = t[17].cast<int64_t>();
+                    c.cache_store_tcp_anet_rpc_thread_num          = t[18].cast<int>();
+                    c.cache_store_tcp_anet_rpc_queue_num           = t[19].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                 }
@@ -908,7 +918,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("getActivationBits", &QuantAlgo::getActivationBits)
         .def("setQuantAlgo", &QuantAlgo::setQuantAlgo);
 
-    // Register NcclCommConfig (NCCL ip/ports for initExecCtx; Python attribute names)
+    // Register NcclCommConfig (NCCL ip/ports; Python attribute names)
     py::class_<NcclCommConfig>(m, "NcclCommConfig")
         .def(py::init<>())
         .def(py::init([](const std::string& nccl_ip,
@@ -1058,19 +1068,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<RuntimeConfig> runtime_config(m, "RuntimeConfig");
     runtime_config.def(py::init<>())
         .def_readwrite("max_generate_batch_size", &RuntimeConfig::max_generate_batch_size)
-        .def_readwrite("pre_allocate_op_mem", &RuntimeConfig::pre_allocate_op_mem)
         .def_readwrite("max_block_size_per_item", &RuntimeConfig::max_block_size_per_item)
         .def_readwrite("reserve_runtime_mem_mb", &RuntimeConfig::reserve_runtime_mem_mb)
         .def_readwrite("warm_up", &RuntimeConfig::warm_up)
         .def_readwrite("warm_up_with_loss", &RuntimeConfig::warm_up_with_loss)
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
-        .def_readwrite("use_gather_batch_scheduler", &RuntimeConfig::use_gather_batch_scheduler)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
         .def_readwrite("worker_addrs", &RuntimeConfig::worker_addrs)
         // Fields merged from PyDeviceResourceConfig
         .def_readwrite("specify_gpu_arch", &RuntimeConfig::specify_gpu_arch)
-        .def_readwrite("acext_gemm_config_dir", &RuntimeConfig::acext_gemm_config_dir)
         // Add sub-configs as properties that return references
         .def_property_readonly(
             "batch_decode_scheduler_config",
@@ -1084,41 +1091,35 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const RuntimeConfig& self) {
                 return py::make_tuple(self.max_generate_batch_size,
-                                      self.pre_allocate_op_mem,
                                       self.max_block_size_per_item,
                                       self.reserve_runtime_mem_mb,
                                       self.warm_up,
                                       self.warm_up_with_loss,
                                       self.use_batch_decode_scheduler,
-                                      self.use_gather_batch_scheduler,
                                       self.batch_decode_scheduler_config,
                                       self.fifo_scheduler_config,
                                       self.model_name,
                                       self.worker_grpc_addrs,
                                       self.worker_addrs,
-                                      self.specify_gpu_arch,
-                                      self.acext_gemm_config_dir);
+                                      self.specify_gpu_arch);
             },
             [](py::tuple t) {
-                if (t.size() != 15)
+                if (t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
                     c.max_generate_batch_size       = t[0].cast<int64_t>();
-                    c.pre_allocate_op_mem           = t[1].cast<bool>();
-                    c.max_block_size_per_item       = t[2].cast<int64_t>();
-                    c.reserve_runtime_mem_mb        = t[3].cast<int64_t>();
-                    c.warm_up                       = t[4].cast<bool>();
-                    c.warm_up_with_loss             = t[5].cast<bool>();
-                    c.use_batch_decode_scheduler    = t[6].cast<bool>();
-                    c.use_gather_batch_scheduler    = t[7].cast<bool>();
-                    c.batch_decode_scheduler_config = t[8].cast<BatchDecodeSchedulerConfig>();
-                    c.fifo_scheduler_config         = t[9].cast<FIFOSchedulerConfig>();
-                    c.model_name                    = t[10].cast<std::string>();
-                    c.worker_grpc_addrs             = t[11].cast<std::vector<std::string>>();
-                    c.worker_addrs                  = t[12].cast<std::vector<std::string>>();
-                    c.specify_gpu_arch              = t[13].cast<std::string>();
-                    c.acext_gemm_config_dir         = t[14].cast<std::string>();
+                    c.max_block_size_per_item       = t[1].cast<int64_t>();
+                    c.reserve_runtime_mem_mb        = t[2].cast<int64_t>();
+                    c.warm_up                       = t[3].cast<bool>();
+                    c.warm_up_with_loss             = t[4].cast<bool>();
+                    c.use_batch_decode_scheduler    = t[5].cast<bool>();
+                    c.batch_decode_scheduler_config = t[6].cast<BatchDecodeSchedulerConfig>();
+                    c.fifo_scheduler_config         = t[7].cast<FIFOSchedulerConfig>();
+                    c.model_name                    = t[8].cast<std::string>();
+                    c.worker_grpc_addrs             = t[9].cast<std::vector<std::string>>();
+                    c.worker_addrs                  = t[10].cast<std::vector<std::string>>();
+                    c.specify_gpu_arch              = t[11].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
                 }
